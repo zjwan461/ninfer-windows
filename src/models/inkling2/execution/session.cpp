@@ -142,6 +142,7 @@ struct Session::Impl {
     void* pre_loop_h = nullptr;
     void* pre_loop_stack = nullptr;
     void* msg_query = nullptr;   // four FP32 message query rows
+    void* concat = nullptr;      // the message gate's two normalised streams, side by side
     void* logits = nullptr;
     void* embed_row = nullptr;
 
@@ -219,6 +220,7 @@ Session::Session(TextWeights& weights, const Config& config, DeviceContext& devi
     s.message = allocate(std::size_t(4) * hidden_bytes);
     s.msg_stack = allocate(std::size_t(2) * hidden_bytes);
     s.msg_query = allocate(std::size_t(4) * kHidden * 4);
+    s.concat = allocate(std::size_t(2) * kHidden * 2);
     s.rms_x = allocate(hidden_bytes);
     s.rms_m = allocate(hidden_bytes);
     s.ones = allocate(std::size_t(kKv) * 2);
@@ -276,7 +278,7 @@ Session::~Session() {
                           s.rel_clip, s.sink, s.gate, s.attn, s.proj, s.attn_conv, s.mlp_in,
                           s.gated, s.forget, s.gain, s.controller, s.gate_up, s.act, s.down,
                           s.mlp_conv, s.moe_acc, s.residual, s.stack, s.message, s.msg_stack,
-                          s.rms_x, s.rms_m, s.msg_query, s.ones, s.indices, s.router_weights, s.position,
+                          s.rms_x, s.rms_m, s.msg_query, s.concat, s.ones, s.indices, s.router_weights, s.position,
                           s.previous_h, s.previous_block, s.pre_loop_h, s.pre_loop_stack,
                           s.logits, s.embed_row, s.k_cache, s.v_cache, s.k_state, s.v_state,
                           s.attn_state, s.mlp_state, s.state_scratch}) {
@@ -334,11 +336,12 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
                                   Role gain_proj, void* x, void* message, void* out) {
         head_rmsnorm(vec(x, kHidden), kEps, vec(s.rms_x, kHidden), stream);
         head_rmsnorm(vec(message, kHidden), kEps, vec(s.rms_m, kHidden), stream);
-        cudaMemcpyAsync(s.attn_conv, s.rms_x, kHidden * 2, cudaMemcpyDeviceToDevice, stream);
-        cudaMemcpyAsync(static_cast<char*>(s.attn_conv) + kHidden * 2, s.rms_m, kHidden * 2,
+        // The gate reads both normalised streams side by side, so this needs a buffer of
+        // 2 * hidden: borrowing a hidden-sized one overruns it and quietly poisons its neighbour.
+        cudaMemcpyAsync(s.concat, s.rms_x, kHidden * 2, cudaMemcpyDeviceToDevice, stream);
+        cudaMemcpyAsync(static_cast<char*>(s.concat) + kHidden * 2, s.rms_m, kHidden * 2,
                         cudaMemcpyDeviceToDevice, stream);
-        // The two normalised streams are concatenated into a [2 * hidden, 1] input.
-        linear(vec(s.attn_conv, 2 * kHidden), matrix_weight(weights, layer[down]),
+        linear(vec(s.concat, 2 * kHidden), matrix_weight(weights, layer[down]),
                vec(s.controller, 64), stream);
         linear_role(layer, forget_proj, s.controller, 64, kHidden, s.forget);
         linear_role(layer, gain_proj, s.controller, 64, kHidden, s.gain);
@@ -683,6 +686,10 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
                                 std::size_t(stack_length) * kHidden * 2, cudaMemcpyDeviceToDevice,
                                 stream);
                 stack_length = 1;
+                if (stage_sink) {
+                    stage_sink(6, "previous_block", s.previous_block, kHidden);
+                    stage_sink(6, "previous_h", s.previous_h, kHidden);
+                }
             }
             pass_seen = static_cast<int>(visit.pass);
         }

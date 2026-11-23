@@ -7,6 +7,7 @@
 #include "models/inkling2/materialize.h"
 
 #include <cstdlib>
+#include <chrono>
 #include <cuda_runtime.h>
 
 #include <algorithm>
@@ -40,6 +41,7 @@ int main(int argc, char** argv) {
         std::filesystem::path artifact_path;
         std::filesystem::path oracle;
         std::uint32_t token = 1234;
+        int bench_steps = 0;
         std::filesystem::path reference_stages;
         for (int i = 1; i < argc; ++i) {
             const std::string arg(argv[i]);
@@ -47,9 +49,10 @@ int main(int argc, char** argv) {
             else if (arg == "--oracle" && i + 1 < argc) { oracle = argv[++i]; }
             else if (arg == "--token" && i + 1 < argc) { token = static_cast<std::uint32_t>(std::stoul(argv[++i])); }
             else if (arg == "--stages" && i + 1 < argc) { reference_stages = argv[++i]; }
+            else if (arg == "--bench" && i + 1 < argc) { bench_steps = std::stoi(argv[++i]); }
             else { throw std::invalid_argument("unknown argument " + arg); }
         }
-        if (artifact_path.empty() || oracle.empty()) {
+        if (artifact_path.empty() || (oracle.empty() && bench_steps == 0)) {
             std::cout << "SKIP: supply --artifact and --oracle\n";
             return 77;
         }
@@ -60,11 +63,29 @@ int main(int argc, char** argv) {
         auto weights = models::inkling2::materialize_text(reader, config, device);
 
         models::inkling2::execution::SessionOptions options;
-        options.max_context = 8;
+        options.max_context = bench_steps > 0 ? 4096 : 8;
         models::inkling2::execution::Session session(weights, config, device, options);
         session.reset();
         // Compare the first visit stage by stage against the model's own dump: a name mismatch
         // here is much easier to place than a wrong logit vector.
+        if (bench_steps > 0) {
+            // Decode: one token per step, caches growing, one synchronisation for the whole run.
+            session.reset();
+            for (int warmup = 0; warmup < 2; ++warmup) {
+                session.step(token, nullptr);
+                cudaDeviceSynchronize();
+            }
+            session.reset();
+            const auto begin = std::chrono::steady_clock::now();
+            for (int step = 0; step < bench_steps; ++step) { session.step(token, nullptr); }
+            cudaDeviceSynchronize();
+            const auto end = std::chrono::steady_clock::now();
+            const double seconds = std::chrono::duration<double>(end - begin).count();
+            std::cout << "session bench: " << bench_steps << " steps in " << seconds << " s -> "
+                      << (double(bench_steps) / seconds) << " tok/s (48 visits, context "
+                      << session.max_context() << ")\n";
+            return 0;
+        }
         int visits_seen = 0;
         int comparisons = 0;
         int missing = 0;
@@ -81,11 +102,22 @@ int main(int argc, char** argv) {
         if (!reference_stages.empty()) {
             session.stage_sink = [&](int layer, const char* name, void* buffer, int width) {
                 const int visit = layer;
-                const int occurrence = seen_per_layer[std::size_t(layer)] / 12;
+                // A layer's "out" events are its passes: the prelude and coda layers run once
+                // (occurrence 0) and the loop core runs once per pass.
+                const int occurrence = seen_per_layer[std::size_t(layer)];
                 if (std::string(name) == "out") { ++seen_per_layer[std::size_t(layer)]; }
                 const std::string stage(name);
                 const std::string file = "layer" + std::to_string(visit) + "." ;
                 (void)file;
+                if (stage == "previous_block" || stage == "previous_h") {
+                    std::vector<std::uint16_t> host(static_cast<std::size_t>(width));
+                    cudaMemcpy(host.data(), buffer, host.size() * 2, cudaMemcpyDeviceToHost);
+                    std::ofstream out("/tmp/session/" + stage + "_" + std::to_string(occurrence) +
+                                      ".bin", std::ios::binary);
+                    out.write(reinterpret_cast<const char*>(host.data()),
+                              std::streamsize(host.size() * 2));
+                    return;
+                }
                 if (stage == "boundary_in") {
                     std::vector<std::uint16_t> host(static_cast<std::size_t>(width));
                     cudaMemcpy(host.data(), buffer, host.size() * 2, cudaMemcpyDeviceToHost);
@@ -154,6 +186,10 @@ int main(int argc, char** argv) {
                     worst = std::max(worst, double(std::fabs(value - expected[i])));
                 }
                 ++comparisons;
+                if (stage == "out" && worst > 0.5) {
+                    std::cout << "    out layer " << visit << " pass " << occurrence << " err "
+                              << worst << "\n";
+                }
                 if (trace_layer == visit) {
                     std::cout << "    trace layer " << visit << " " << stage << " " << worst
                               << "\n";

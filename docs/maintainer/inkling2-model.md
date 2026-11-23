@@ -131,6 +131,18 @@ used, or every comparison is meaningless: the block states, the attention inputs
 all belong to a different prompt. `--token-id 1234` is the token the current oracle was recorded
 with; `layer0.in_00` matching `visit_in_0` exactly is the check that it is the right one.
 
+## 8c. The session reproduces the reference
+
+`execution/session.cpp` runs the 48 visits with a cache per visit and reproduces the recorded
+reference logits to 0.14 absolute with the same five top candidates. On one 78-SM slice of an H20
+it decodes at 21.4 tok/s with a 4096-token cache.
+
+Getting there cost one bug worth recording: the message gate concatenates two normalised hidden
+states before its 64-wide projection, and that scratch was a **hidden-sized** buffer. Writing
+2 * hidden into it overran the allocation and poisoned whatever came after it in the arena. Pass 0
+(no messages) was perfect while every later pass drifted, which read like a cross-pass logic error
+and was really a one-line size mistake.
+
 ## 8b. What a decode step costs, measured
 
 Single token, NVFP4 pass-through artifact, one 78-SM slice of an H20 (a weak card, so these are

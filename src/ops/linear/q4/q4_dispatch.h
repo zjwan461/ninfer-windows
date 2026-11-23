@@ -14,4 +14,7 @@ Q4Launch select_q4_launch(std::int32_t n, std::int32_t k, std::int32_t t, Linear
 void q4_dispatch(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy policy,
                  cudaStream_t stream);
 
+// True when a tuned q4 route exists for this geometry.
+[[nodiscard]] bool has_q4_shape(std::int32_t n, std::int32_t k);
+
 } // namespace ninfer::ops::detail

@@ -7,6 +7,7 @@
 #include "ops/linear/nvfp4/nvfp4_format.h"
 #include "ops/linear/nvfp4/nvfp4_launch.h"
 #include "ops/linear/q4/q4_dispatch.h"
+#include "ops/linear/q4/q4_launch.h"
 #include "ops/linear/q5/q5_dispatch.h"
 #include "ops/linear/q6/q6_dispatch.h"
 #include "ops/linear/q8/q8_dispatch.h"
@@ -82,6 +83,11 @@ void dispatch_linear(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy
                      WorkspaceArena* workspace, cudaStream_t stream) {
     switch (w.qtype) {
     case QType::Q4_G64_FP16:
+        // Shapes the tuned table does not cover still have to run at a single token.
+        if (x.ne[1] == 1 && !detail::has_q4_shape(w.n, w.k)) {
+            detail::launch_q4_generic_gemv(x, w, out, stream);
+            return;
+        }
         detail::q4_dispatch(x, w, out, policy, stream);
         return;
     case QType::Q5_G64_FP16:

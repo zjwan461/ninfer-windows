@@ -18,6 +18,7 @@ constexpr std::string_view kBf16 = "bf16";
 constexpr std::string_view kFp32 = "fp32";
 constexpr std::string_view kNvfp4 = "nvfp4";
 constexpr std::string_view kQ8    = "q8_g32_fp16";
+constexpr std::string_view kQ4    = "q4_g64_fp16";
 
 std::string layer_prefix(std::uint32_t layer) {
     return "text/layers/" + std::to_string(layer) + "/";
@@ -163,11 +164,21 @@ std::vector<BoundSlot> bind_parameters(const Directory& directory, const Config&
             throw ArtifactError("Inkling2: " + slot.name + " stores " + join_shape(object.shape) +
                                 ", expected " + join_shape(slot.shape));
         }
-        if (object.format != slot.format) {
+        // The coda's experts are requantised rather than passed through, so the artifact may
+        // carry them at either width: q8 keeps the checkpoint's own granularity and q4 is the
+        // recipe that fits a 16 GB card. Both are the same mathematics, and the artifact says
+        // which one it holds.
+        const bool alternate_coda_expert =
+            slot.format == kQ8 && object.format == kQ4 &&
+            (slot.name.ends_with("/w13") || slot.name.ends_with("/w2"));
+        if (object.format != slot.format && !alternate_coda_expert) {
             throw ArtifactError("Inkling2: " + slot.name + " is stored as " + object.format +
                                 ", expected " + slot.format);
         }
-        bound.push_back(BoundSlot{slot.name, slot.shape, slot.format, entry.parts.front().object});
+        // The object's own format wins: for the coda's experts the artifact may legitimately
+        // carry either width, and everything downstream reads this field.
+        bound.push_back(BoundSlot{slot.name, slot.shape, object.format,
+                                  entry.parts.front().object});
     }
     return bound;
 }
@@ -175,6 +186,7 @@ std::vector<BoundSlot> bind_parameters(const Directory& directory, const Config&
 QType weight_type(std::string_view format) {
     if (format == kNvfp4) { return QType::NVFP4; }
     if (format == kQ8) { return QType::Q8_G32_FP16; }
+    if (format == kQ4) { return QType::Q4_G64_FP16; }
     if (format == kBf16) { return QType::BF16; }
     if (format == kFp32) { return QType::FP32; }
     throw ArtifactError("Inkling2: unsupported stored format " + std::string(format));

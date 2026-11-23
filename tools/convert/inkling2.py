@@ -528,7 +528,17 @@ def audit(store, layers=range(24), weight="w13_weight") -> list[str]:
 # ---------------------------------------------------------------------------------------------
 
 EXPERT_AUX = ("_scale", "_amax", "_outer_scale_denominator")
+# Layers 20-23 hold MXFP8 experts, which have no pass-through format here, so they are
+# dequantised and requantised. q8 is the faithful choice; q4 is the one that fits a 16 GB card,
+# and it is the whole of that difference: 5.4 GiB against 2.7.
 MXFP8_TARGET_FORMAT = "q8_g32_fp16"
+COMPACT_MXFP8_TARGET_FORMAT = "q4_g64_fp16"
+
+
+def use_compact_recipe(enabled: bool) -> None:
+    """Requantise the coda's experts to four bits, for cards that cannot hold eight."""
+    global MXFP8_TARGET_FORMAT
+    MXFP8_TARGET_FORMAT = COMPACT_MXFP8_TARGET_FORMAT if enabled else "q8_g32_fp16"
 
 
 def _parameter_family(name: str, layer: int | None) -> str:
@@ -655,8 +665,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--emit", type=Path,
                         help="write a .ninfer artifact from --shard")
     parser.add_argument("--check", action="store_true", help="fail on any spec disagreement")
+    parser.add_argument("--compact", action="store_true",
+                        help="requantise the coda's experts to four bits for a 16 GB card")
     args = parser.parse_args(argv)
 
+    use_compact_recipe(args.compact)
     source = Source.load(args.config, args.index, args.quant)
     plan = emit_plan(source)
     print(f"{plan['architecture']}: {len(plan['slots'])} tensors, {plan['visits']} visits, "

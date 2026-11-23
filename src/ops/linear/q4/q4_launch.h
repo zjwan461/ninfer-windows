@@ -26,4 +26,8 @@ void launch_q4_mma_r64_c112(const Tensor& x, const Weight& w, Tensor& out, cudaS
 void launch_q4_mma_r64_c120(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream);
 void launch_q4_mma_r64_c128(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream);
 
+// Runtime-extent q4 decode route for shapes without a tuned kernel.
+void launch_q4_generic_gemv(const Tensor& x, const Weight& weight, Tensor& out,
+                            cudaStream_t stream);
+
 } // namespace ninfer::ops::detail

@@ -131,6 +131,23 @@ used, or every comparison is meaningless: the block states, the attention inputs
 all belong to a different prompt. `--token-id 1234` is the token the current oracle was recorded
 with; `layer0.in_00` matching `visit_in_0` exactly is the check that it is the right one.
 
+## 9c. The compact recipe, measured
+
+`--compact` requantises the coda's four layers of experts from q8 to q4, which is the one lever
+that exists without writing a new format:
+
+| | pass-through | compact |
+|---|---|---|
+| artifact | 18.33 GiB | 16.31 GiB |
+| worst visit against the 48-visit oracle | 0.84% | 4.6% |
+| logits max abs error | 0.14 | 1.11 |
+| top-5 shared with the reference | 5/5 | 3/5 |
+
+So it buys 2.0 GiB for about five times the error, and 16.31 GiB still does not fit a 16 GB card.
+Getting under 14 GiB also means quantising the attention projections and the unembedding, which is
+another 1.4 GiB and more of the same error. That is a trade the model's owner should make, not one
+to make quietly: the 32 GB card runs the pass-through artifact with no compromise at all.
+
 ## 9b. What fits on which card
 
 The pass-through artifact is 18.33 GiB, and the routed experts are 14.87 GiB of it (81%): 9.49 GiB

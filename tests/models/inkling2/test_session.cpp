@@ -6,6 +6,7 @@
 #include "models/inkling2/execution/session.h"
 #include "models/inkling2/materialize.h"
 
+#include <cstdlib>
 #include <cuda_runtime.h>
 
 #include <algorithm>
@@ -72,6 +73,8 @@ int main(int argc, char** argv) {
         // The sink outlives this block: the step that drives it happens later, so everything it
         // reads has to be declared out here.
         std::vector<int> seen_per_layer(24, 0);
+        const char* trace_env = std::getenv("TRACE_LAYER");
+        const int trace_layer = trace_env == nullptr ? -1 : std::atoi(trace_env);
         std::vector<double> layer_worst(24, 0.0);
         int routing_flips = 0;
         std::vector<std::string> layer_worst_stage(24);
@@ -130,6 +133,10 @@ int main(int argc, char** argv) {
                     worst = std::max(worst, double(std::fabs(value - expected[i])));
                 }
                 ++comparisons;
+                if (trace_layer == visit) {
+                    std::cout << "    trace layer " << visit << " " << stage << " " << worst
+                              << "\n";
+                }
                 if (worst > worst_stage) { worst_stage = worst; worst_layer = visit; }
                 if (worst > layer_worst[std::size_t(visit)]) {
                     layer_worst[std::size_t(visit)] = worst;

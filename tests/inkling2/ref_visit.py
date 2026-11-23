@@ -80,8 +80,11 @@ if in_core:
     prev_h = visit_in(visit_of(17, loop_pass - 1) + 1) if loop_pass > 0 else None
     prev_block = visit_in(12) if loop_pass > 0 else None
 else:
-    # After the core's last pass the block stack holds the pass-2 boundary entries.
+    # After the core's last pass the block stack holds the pass-2 boundary entries; the coda's own
+    # first layer (18) is a boundary as well, so later coda layers see its entry too.
     stack = [visit_in(0), visit_in(visit_of(6, 2)), visit_in(visit_of(12, 2))]
+    if layer > 18:
+        stack.append(visit_in(42))
     prev_h = prev_block = None
 
 with safe_open(SHARD, framework='pt') as f:
@@ -202,9 +205,31 @@ with safe_open(SHARD, framework='pt') as f:
     print('experts', sel.tolist())
 
     order = np.where(np.arange(2304) < 1152, np.arange(2304) * 2, (np.arange(2304) - 1152) * 2 + 1)
-    denom = float(g('mlp.experts.w13_weight_outer_scale_denominator').reshape(-1)[0])
+    mxfp8 = layer in (20, 21, 22, 23)
+    if not mxfp8:
+        denom = float(g('mlp.experts.w13_weight_outer_scale_denominator').reshape(-1)[0])
     acc = np.zeros(2304, dtype=np.float64)
     for j, e in enumerate(sel):
+        if mxfp8:
+            # Layers 20-23 keep the checkpoint's MXFP8 experts; the artifact requantises them.
+            import torch
+            from tools.convert.inkling2 import dequantize_mxfp8
+            prefix = f'model.llm.layers.{layer}.mlp.experts'
+            def mxfp(name):
+                packed = f.get_tensor(f'{prefix}.{name}')
+                packed = packed[e].view(torch.uint8).numpy()
+                scales = f.get_tensor(f'{prefix}.{name}_scale')[e].view(torch.uint8).numpy()
+                rows = f.get_tensor(f'{prefix}.{name}').shape[1]
+                values = dequantize_mxfp8(torch.from_numpy(packed), torch.from_numpy(scales)).numpy()
+                return values
+            w13 = mxfp('w13_weight').astype(np.float64)[order]
+            w2 = mxfp('w2_weight').astype(np.float64)
+            up = w13 @ x
+            gp, upp = up[:1152], up[1152:]
+            act = np.tanh(gp / 4.0) * 4.0 * (1 / (1 + np.exp(-gp))) * np.tanh(upp / 25.0) * 25.0
+            acc += w[j] * (w2 @ act)
+            continue
+
         def deq(codes, scales, rows, cols_bytes):
             packed = codes.reshape(rows, cols_bytes)
             lo, hi = (packed & 0xF).astype(np.int64), (packed >> 4).astype(np.int64)

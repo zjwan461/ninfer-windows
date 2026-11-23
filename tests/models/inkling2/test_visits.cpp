@@ -883,6 +883,7 @@ int main(int argc, char** argv) {
         bool force_routing = false;
         bool zero_messages = false;
         bool zero_queries = false;
+        int seed_visit = -1;      // run exactly one visit, seeded from the oracle's inputs
         for (int i = 1; i < argc; ++i) {
             const std::string arg(argv[i]);
             if (arg == "--artifact" && i + 1 < argc) { artifact_path = argv[++i]; }
@@ -892,6 +893,7 @@ int main(int argc, char** argv) {
             else if (arg == "--force-routing") { force_routing = true; }
             else if (arg == "--zero-messages") { zero_messages = true; }
             else if (arg == "--zero-queries") { zero_queries = true; }
+            else if (arg == "--seed-visit" && i + 1 < argc) { seed_visit = std::stoi(argv[++i]); }
             else { throw std::invalid_argument("unknown argument " + arg); }
         }
         if (artifact_path.empty() || oracle.empty()) {
@@ -935,6 +937,32 @@ int main(int argc, char** argv) {
 
         double worst = 0.0;
         int worst_visit = -1;
+        if (seed_visit >= 0) {
+            // Isolate one visit: give it the oracle's own inputs so the comparison measures this
+            // layer's arithmetic rather than the drift it inherited.
+            const auto load_into = [&](const std::string& name, void* dst) {
+                const auto path = oracle / name;
+                if (!std::filesystem::exists(path)) {
+                    throw std::runtime_error("seed: missing " + path.string());
+                }
+                const auto values = read_f32(path);
+                std::vector<std::uint16_t> packed(values.size());
+                for (std::size_t i = 0; i < values.size(); ++i) { packed[i] = to_bf16(values[i]); }
+                cudaMemcpy(dst, packed.data(), packed.size() * 2, cudaMemcpyHostToDevice);
+            };
+            load_into("visit_in_0.bin", runner.s.stack);
+            load_into("visit_in_30.bin", static_cast<char*>(runner.s.stack) + kHidden * 2);
+            load_into("visit_in_36.bin", static_cast<char*>(runner.s.stack) + 2 * kHidden * 2);
+            stack_length = 3;  // the pass-2 boundary entries
+            if (seed_visit > 42) {
+                // Layer 18 is a boundary too, so every later coda visit sees its entry.
+                load_into("visit_in_42.bin", static_cast<char*>(runner.s.stack) + 3 * kHidden * 2);
+                stack_length = 4;
+            }
+            load_into("visit_in_" + std::to_string(seed_visit) + ".bin", runner.s.h);
+            cudaMemcpy(pre_loop_h, runner.s.h, kHidden * 2, cudaMemcpyDeviceToDevice);
+        }
+
         for (std::size_t index = 0; index < schedule.visits.size(); ++index) {
             const auto& visit = schedule.visits[index];
             runner.stage = !stages.empty();
@@ -962,6 +990,10 @@ int main(int argc, char** argv) {
                            std::size_t(stack_length) * kHidden * 2, cudaMemcpyDeviceToDevice);
                 pre_loop_stack_length = stack_length;
                 pre_loop_saved = true;
+            }
+            if (seed_visit >= 0 && static_cast<int>(index) != seed_visit) {
+                if (static_cast<int>(index) > seed_visit) { break; }
+                continue;
             }
             runner.run_visit(static_cast<int>(index), visit.layer, visit.pass, visit.layer - 6,
                              stack_length, previous_block, previous_h);
@@ -1003,20 +1035,53 @@ int main(int argc, char** argv) {
         if (std::filesystem::exists(logits_path)) {
             Tensor final_query(dense_tensor(weights, weights.index.output_query).data,
                                DType::FP32, {kHidden, 1});
-            Tensor final_states(runner.s.stack, DType::BF16, {kHidden, stack_length + 2});
-            cudaMemcpyAsync(static_cast<char*>(runner.s.stack) + (stack_length + 1) * kHidden * 2,
+            // The final read sees the finished block stack plus the last hidden state, exactly
+            // like any other block read.
+            Tensor final_states(runner.s.stack, DType::BF16, {kHidden, stack_length + 1});
+            cudaMemcpyAsync(static_cast<char*>(runner.s.stack) + stack_length * kHidden * 2,
                             runner.s.h, kHidden * 2, cudaMemcpyDeviceToDevice, nullptr);
             Tensor final_out(runner.s.mlp_in, DType::BF16, {kHidden, 1});
             block_residual_read(final_query, final_states, kEps, final_out, nullptr);
             Tensor top(runner.s.gated_x, DType::BF16, {kHidden, 1});
-            rmsnorm(final_out, dense_tensor(weights, weights.index.norm), kEps, false, top, nullptr);
+            auto norm_weight_tensor = dense_tensor(weights, weights.index.norm);
+            {
+                std::vector<std::uint16_t> w(static_cast<std::size_t>(kHidden));
+                cudaMemcpy(w.data(), norm_weight_tensor.data, w.size() * 2, cudaMemcpyDeviceToHost);
+                double sum = 0.0;
+                for (auto v : w) { sum += double(from_bf16(v)) * double(from_bf16(v)); }
+                std::vector<std::uint16_t> f(static_cast<std::size_t>(kHidden));
+                cudaMemcpy(f.data(), final_out.data, f.size() * 2, cudaMemcpyDeviceToHost);
+                double fs = 0.0;
+                for (auto v : f) { fs += double(from_bf16(v)) * double(from_bf16(v)); }
+                std::cout << "      read output L2 " << std::sqrt(fs) << "\n";
+                std::cout << "      final norm weight L2 " << std::sqrt(sum) << " (first "
+                          << from_bf16(w[0]) << ")\n";
+            }
+            rmsnorm(final_out, norm_weight_tensor, kEps, false, top, nullptr);
+
 
             auto unembed = matrix_weight(weights, weights.index.unembed);
             const int vocab = unembed.n;
             void* d_logits = nullptr;
             cudaMalloc(&d_logits, std::size_t(vocab) * 2);
             Tensor logits_out(d_logits, DType::BF16, {vocab, 1});
+            {
+                std::vector<std::uint16_t> a(static_cast<std::size_t>(kHidden));
+                cudaMemcpy(a.data(), top.data, a.size() * 2, cudaMemcpyDeviceToHost);
+                std::ofstream out("/tmp/my_final_hidden.bin", std::ios::binary);
+                out.write(reinterpret_cast<const char*>(a.data()), std::streamsize(a.size() * 2));
+            }
             linear(top, unembed, logits_out, nullptr);
+            // The model bounds the logits with a tanh softcap of 30 before sampling.
+            { 
+                std::vector<std::uint16_t> host(static_cast<std::size_t>(vocab));
+                cudaMemcpy(host.data(), d_logits, host.size() * 2, cudaMemcpyDeviceToHost);
+                for (auto& value : host) {
+                    const float v = from_bf16(value);
+                    value = to_bf16(30.0F * std::tanh(v / 30.0F));
+                }
+                cudaMemcpy(d_logits, host.data(), host.size() * 2, cudaMemcpyHostToDevice);
+            }
             const auto status = cudaDeviceSynchronize();
             if (status != cudaSuccess) {
                 std::cerr << "unembed: " << cudaGetErrorString(status) << "\n";
@@ -1025,6 +1090,11 @@ int main(int argc, char** argv) {
             std::vector<std::uint16_t> host_logits(static_cast<std::size_t>(vocab));
             cudaMemcpy(host_logits.data(), d_logits, host_logits.size() * 2,
                        cudaMemcpyDeviceToHost);
+            {
+                std::ofstream out("/tmp/my_logits.bin", std::ios::binary);
+                out.write(reinterpret_cast<const char*>(host_logits.data()),
+                          std::streamsize(host_logits.size() * 2));
+            }
             const auto reference_logits = read_f32(logits_path);
             std::vector<int> mine(vocab), refs(vocab);
             for (int i = 0; i < vocab; ++i) { mine[static_cast<std::size_t>(i)] = i; }

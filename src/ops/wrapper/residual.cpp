@@ -57,4 +57,11 @@ void residual_store_bf16(Tensor& out, const Tensor& base, const Tensor& addend,
     detail::residual_store_bf16_launch(out, base, addend, stream);
 }
 
+void axpy_bf16_into_f32(Tensor& acc, const Tensor& x, float scale, cudaStream_t stream) {
+    require(acc, DType::FP32, "acc");
+    require(x, DType::BF16, "x");
+    require_same(acc, x, acc);
+    detail::axpy_bf16_into_f32_launch(acc, x, scale, stream);
+}
+
 } // namespace ninfer::ops

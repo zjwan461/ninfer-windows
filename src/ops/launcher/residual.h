@@ -10,5 +10,6 @@ void residual_add_f32_launch(Tensor& out, const Tensor& base, const Tensor& adde
                              cudaStream_t stream);
 void residual_store_bf16_launch(Tensor& out, const Tensor& base, const Tensor& addend,
                                 cudaStream_t stream);
+void axpy_bf16_into_f32_launch(Tensor& acc, const Tensor& x, float scale, cudaStream_t stream);
 
 } // namespace ninfer::ops::detail

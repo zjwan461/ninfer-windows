@@ -36,6 +36,13 @@ __global__ void residual_store_bf16_kernel(const float* __restrict__ base,
     }
 }
 
+__global__ void axpy_bf16_into_f32_kernel(float* __restrict__ acc,
+                                          const __nv_bfloat16* __restrict__ x, float scale,
+                                          std::int64_t count) {
+    const std::int64_t index = std::int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (index < count) { acc[index] += scale * __bfloat162float(x[index]); }
+}
+
 unsigned blocks(std::int64_t count) { return static_cast<unsigned>((count + 255) / 256); }
 
 } // namespace
@@ -70,6 +77,13 @@ void residual_store_bf16_launch(Tensor& out, const Tensor& base, const Tensor& a
     residual_store_bf16_kernel<<<blocks(count), 256, 0, stream>>>(
         static_cast<const float*>(base.data), static_cast<const __nv_bfloat16*>(addend.data),
         static_cast<__nv_bfloat16*>(out.data), count);
+}
+
+void axpy_bf16_into_f32_launch(Tensor& acc, const Tensor& x, float scale, cudaStream_t stream) {
+    const std::int64_t count = acc.numel();
+    if (count <= 0) { return; }
+    axpy_bf16_into_f32_kernel<<<blocks(count), 256, 0, stream>>>(
+        static_cast<float*>(acc.data), static_cast<const __nv_bfloat16*>(x.data), scale, count);
 }
 
 } // namespace ninfer::ops::detail

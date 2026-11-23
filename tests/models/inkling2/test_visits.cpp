@@ -24,6 +24,7 @@
 #include "ninfer/ops/scaled_l2_clip.h"
 #include "ninfer/ops/softcapped_swiglu.h"
 
+#include <chrono>
 #include <cuda_runtime.h>
 
 #include <cmath>
@@ -134,6 +135,7 @@ struct Scratch {
     void* rms_m;
     void* msg_stack;  // [2, hidden] for the cross-pass message read
     void* res_f32;    // [hidden] FP32 residual accumulator
+    void* moe_acc;    // [hidden] FP32 mixture accumulator
     void* res_tmp;
     void* q_clip;
     void* k_clip;
@@ -188,6 +190,24 @@ struct Runner {
         compare(device, stage_fixture / name, name.c_str(), width);
     }
 
+    // Embedding through the artifact's own matrix, then the embedding norm, so a benchmark runs
+    // the same entry path a real session would.
+    void embed_token(std::uint32_t token) {
+        auto embed = matrix_weight(weights, weights.index.embed);
+        if (embed.qtype != QType::BF16) {
+            throw std::runtime_error("embed_token: the embedding matrix must be BF16");
+        }
+        const auto width = static_cast<std::size_t>(embed.k);
+        if (token >= static_cast<std::uint32_t>(embed.n)) {
+            throw std::out_of_range("embed_token: token outside the vocabulary");
+        }
+        Tensor row(const_cast<void*>(static_cast<const void*>(
+                       static_cast<const char*>(embed.qdata) + std::size_t(token) * width * 2)),
+                   DType::BF16, {embed.k, 1});
+        Tensor out(s.h, DType::BF16, {kHidden, 1});
+        rmsnorm(row, dense_tensor(weights, weights.index.embed_norm), kEps, false, out, nullptr);
+    }
+
     void init() {
         auto make = [](std::size_t count) { return alloc(count, 2); };
         s.h = make(kHidden); s.attn_in = make(kHidden);
@@ -206,6 +226,7 @@ struct Runner {
         s.concat = make(2 * kHidden); s.rms_x = make(kHidden); s.rms_m = make(kHidden);
         s.q_clip = make(kQ); s.k_clip = make(kKv); s.v_norm = make(kKv); s.rel_clip = make(kRel);
         s.res_f32 = alloc(kHidden, 4);
+        s.moe_acc = alloc(kHidden, 4);
         s.res_tmp = alloc(kHidden, 4);
         s.ones = make(kKv);
         {
@@ -797,7 +818,10 @@ struct Runner {
             std::cout << "      my mlp_in[0:3] " << from_bf16(a[0]) << " " << from_bf16(a[1]) << " "
                       << from_bf16(a[2]) << "\n";
         }
-        std::vector<double> accumulator(kHidden, 0.0);
+        // The mixture accumulates in FP32 on the device: a host round trip per expert serialises
+        // the pipeline behind eight synchronisations per visit.
+        Tensor acc(s.moe_acc, DType::FP32, {kHidden, 1});
+        cudaMemsetAsync(s.moe_acc, 0, kHidden * 4, stream);
         for (int j = 0; j < kTopK; ++j) {
             const auto expert = static_cast<std::size_t>(indices[static_cast<std::size_t>(j)]);
             linear(vec(s.mlp_in, kHidden), matrix_weight(weights, layer.expert_w13[expert]),
@@ -805,19 +829,10 @@ struct Runner {
             softcapped_swiglu(vec(s.gate_up, 2 * kInter), 4.0F, 25.0F, vec(s.act, kInter), stream);
             linear(vec(s.act, kInter), matrix_weight(weights, layer.expert_w2[expert]),
                    vec(s.down, kHidden), stream);
-            std::vector<std::uint16_t> host(kHidden);
-            cudaMemcpy(host.data(), s.down, kHidden * 2, cudaMemcpyDeviceToHost);
-            for (int i = 0; i < kHidden; ++i) {
-                accumulator[static_cast<std::size_t>(i)] +=
-                    double(routing[static_cast<std::size_t>(j)]) *
-                    double(from_bf16(host[static_cast<std::size_t>(i)]));
-            }
+            axpy_bf16_into_f32(acc, vec(s.down, kHidden),
+                               routing[static_cast<std::size_t>(j)], stream);
         }
-        std::vector<std::uint16_t> host_moe(kHidden);
-        for (int i = 0; i < kHidden; ++i) {
-            host_moe[static_cast<std::size_t>(i)] = to_bf16(float(accumulator[static_cast<std::size_t>(i)]));
-        }
-        cudaMemcpy(s.down, host_moe.data(), kHidden * 2, cudaMemcpyHostToDevice);
+        cast_f32_to_bf16(vec(s.down, kHidden), acc, stream);
 
         {
             const auto path = stage_fixture /
@@ -897,6 +912,7 @@ int main(int argc, char** argv) {
         bool zero_messages = false;
         bool zero_queries = false;
         int seed_visit = -1;      // run exactly one visit, seeded from the oracle's inputs
+        int bench_steps = 0;      // time the whole visit chain instead of checking it
         for (int i = 1; i < argc; ++i) {
             const std::string arg(argv[i]);
             if (arg == "--artifact" && i + 1 < argc) { artifact_path = argv[++i]; }
@@ -908,9 +924,11 @@ int main(int argc, char** argv) {
             else if (arg == "--zero-messages") { zero_messages = true; }
             else if (arg == "--zero-queries") { zero_queries = true; }
             else if (arg == "--seed-visit" && i + 1 < argc) { seed_visit = std::stoi(argv[++i]); }
+            else if (arg == "--bench" && i + 1 < argc) { bench_steps = std::stoi(argv[++i]); }
             else { throw std::invalid_argument("unknown argument " + arg); }
         }
-        if (artifact_path.empty() || oracle.empty()) {
+        // A benchmark needs only the artifact; the oracle drives the comparisons.
+        if (artifact_path.empty() || (oracle.empty() && bench_steps == 0)) {
             std::cout << "SKIP: supply --artifact and --oracle\n";
             return 77;
         }
@@ -934,11 +952,16 @@ int main(int argc, char** argv) {
             runner.stage = true;
         }
 
-        // The token enters layer 0 as the embedded row the oracle recorded.
-        const auto first_in = read_f32(oracle / "visit_in_0.bin");
-        std::vector<std::uint16_t> host_h(first_in.size());
-        for (std::size_t i = 0; i < first_in.size(); ++i) { host_h[i] = to_bf16(first_in[i]); }
-        cudaMemcpy(runner.s.h, host_h.data(), host_h.size() * 2, cudaMemcpyHostToDevice);
+        // The token enters layer 0 as the embedded row the oracle recorded; a benchmark has no
+        // oracle, so it embeds a fixed token through the artifact's own matrix instead.
+        if (!oracle.empty()) {
+            const auto first_in = read_f32(oracle / "visit_in_0.bin");
+            std::vector<std::uint16_t> host_h(first_in.size());
+            for (std::size_t i = 0; i < first_in.size(); ++i) { host_h[i] = to_bf16(first_in[i]); }
+            cudaMemcpy(runner.s.h, host_h.data(), host_h.size() * 2, cudaMemcpyHostToDevice);
+        } else {
+            runner.embed_token(1234);
+        }
 
         int stack_length = 0;
         void* previous_h = alloc(kHidden, 2);
@@ -951,6 +974,39 @@ int main(int argc, char** argv) {
         // Pass 0 ends with the states later passes read their messages from.
         std::vector<std::uint16_t> previous_hidden;
         int pass_seen = -1;
+
+        if (bench_steps > 0) {
+            // Time the same chain the checker runs: 48 layer visits over the artifact's weights.
+            // This is a decode measurement with a one-token context, which is where the
+            // mixture-of-experts cost dominates.
+            // One-token context: the block stack has one entry for the prelude and grows by one
+            // at each boundary within the pass being timed.
+            const auto run_chain = [&]() {
+                int depth = 0;
+                for (const auto& visit : schedule.visits) {
+                    runner.run_visit(static_cast<int>(visit.index), static_cast<int>(visit.layer),
+                                     static_cast<int>(visit.pass),
+                                     static_cast<int>(visit.layer) - 6, depth, previous_block,
+                                     previous_h);
+                    if (visit.layer % 6 == 0) { ++depth; }
+                    if (visit.pass > 0 && visit.layer == 6) { depth = 1; }
+                }
+            };
+            for (int warmup = 0; warmup < 2; ++warmup) {
+                run_chain();
+                cudaDeviceSynchronize();
+            }
+            const auto begin = std::chrono::steady_clock::now();
+            for (int step = 0; step < bench_steps; ++step) { run_chain(); }
+            cudaDeviceSynchronize();
+            const auto end = std::chrono::steady_clock::now();
+            const double seconds =
+                std::chrono::duration<double>(end - begin).count();
+            std::cout << "bench: " << bench_steps << " steps in " << seconds << " s -> "
+                      << (double(bench_steps) / seconds) << " tok/s over "
+                      << schedule.visits.size() << " visits\n";
+            return 0;
+        }
 
         double worst = 0.0;
         double worst_relative = 0.0;

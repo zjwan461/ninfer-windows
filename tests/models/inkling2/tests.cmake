@@ -22,3 +22,8 @@ ninfer_add_test(ninfer_inkling2_nvfp4_generic_gemv_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_nvfp4_generic_gemv.cpp"
   LIBRARIES ninfer_model_loading ninfer_ops)
 set_tests_properties(ninfer_inkling2_nvfp4_generic_gemv_test PROPERTIES SKIP_RETURN_CODE 77)
+
+ninfer_add_test(ninfer_inkling2_layer0_artifact_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_layer0_artifact.cpp"
+  LIBRARIES ninfer_model_loading ninfer_ops)
+set_tests_properties(ninfer_inkling2_layer0_artifact_test PROPERTIES SKIP_RETURN_CODE 77)

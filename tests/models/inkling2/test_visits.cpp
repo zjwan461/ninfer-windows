@@ -163,7 +163,7 @@ struct Runner {
     Scratch s{};
     cudaStream_t stream = nullptr;
     double worst_visit = 0.0;
-    void* gate_f32 = nullptr;
+    std::vector<void*> gate_f32;  // per layer: the router widened to FP32 once
     void* msg_query = nullptr;
     int message_mode = 0;                 // 0: cross-pass read, 1: zero messages
     std::filesystem::path route_dir;      // optional: reference routing per visit
@@ -737,16 +737,24 @@ struct Runner {
         // ---- routed experts ---------------------------------------------------------------
         auto gate_w = dense_tensor(weights, layer[Role::MlpGate]);
         auto gate_bias = dense_tensor(weights, layer[Role::MlpGateBias]);
-        // The checkpoint stores the router in BF16 while the reference runs it in FP32.
-        if (gate_f32 == nullptr) { gate_f32 = alloc(std::size_t(kExperts) * kHidden, 4); }
-        {
+        // The checkpoint stores the router in BF16 while the reference runs it in FP32. That
+        // widening is a property of the weights, not of the visit, so it happens once per layer
+        // instead of once per visit: the per-visit version moved 590 KB through the host and
+        // synchronised the device for it, 48 times a token.
+        if (gate_f32.empty()) {
+            gate_f32.assign(weights.index.layers.size(), nullptr);
+        }
+        if (gate_f32[static_cast<std::size_t>(layer_index)] == nullptr) {
             std::vector<std::uint16_t> host_gate(std::size_t(kExperts) * kHidden);
             std::vector<float> wide(host_gate.size());
             cudaMemcpy(host_gate.data(), gate_w.data, host_gate.size() * 2, cudaMemcpyDeviceToHost);
             for (std::size_t i = 0; i < host_gate.size(); ++i) { wide[i] = from_bf16(host_gate[i]); }
-            cudaMemcpy(gate_f32, wide.data(), wide.size() * 4, cudaMemcpyHostToDevice);
+            void* widened = alloc(wide.size(), 4);
+            cudaMemcpy(widened, wide.data(), wide.size() * 4, cudaMemcpyHostToDevice);
+            gate_f32[static_cast<std::size_t>(layer_index)] = widened;
         }
-        Tensor gate_matrix(gate_f32, DType::FP32, {kExperts, kHidden});
+        Tensor gate_matrix(gate_f32[static_cast<std::size_t>(layer_index)], DType::FP32,
+                           {kExperts, kHidden});
         Tensor gate_bias_vec(gate_bias.data, DType::FP32, {kExperts});
         Tensor router_out(s.indices, DType::I32, {kTopK, 1});
         Tensor router_weights(s.router_weights, DType::FP32, {kTopK, 1});
@@ -759,9 +767,10 @@ struct Runner {
             cudaMemcpy(xh.data(), s.mlp_in, kHidden * 2, cudaMemcpyDeviceToHost);
             const std::vector<float>* gate_host = nullptr;
             std::vector<float> gate_copy;
-            if (gate_f32 != nullptr) {
+            if (!gate_f32.empty()) {
                 gate_copy.resize(std::size_t(kExperts) * kHidden);
-                cudaMemcpy(gate_copy.data(), gate_f32, gate_copy.size() * 4,
+                cudaMemcpy(gate_copy.data(), gate_f32[static_cast<std::size_t>(layer_index)],
+                           gate_copy.size() * 4,
                            cudaMemcpyDeviceToHost);
                 gate_host = &gate_copy;
             }

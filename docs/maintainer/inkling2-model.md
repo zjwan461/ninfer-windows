@@ -131,6 +131,30 @@ used, or every comparison is meaningless: the block states, the attention inputs
 all belong to a different prompt. `--token-id 1234` is the token the current oracle was recorded
 with; `layer0.in_00` matching `visit_in_0` exactly is the check that it is the right one.
 
+## 8b. What a decode step costs, measured
+
+Single token, NVFP4 pass-through artifact, one 78-SM slice of an H20 (a weak card, so these are
+ratios more than absolutes):
+
+| | |
+|---|---|
+| whole 48-visit chain | 19.5 tok/s (51 ms) |
+| attention half only | 105 tok/s (9.4 ms) |
+| 768 expert GEMVs (2304x2304) | ~42 ms |
+
+The expert GEMVs move 2 GB of codes and scales per token, which at this card's bandwidth would be
+about 2 ms, so there is roughly a factor of twenty left in that kernel. The rest of the chain is
+already within a factor of a few of what the op count suggests.
+
+Two measurement traps cost a day of guessing here, both worth remembering:
+
+- **`cudaMalloc` in the layer loop.** A per-visit allocation and free synchronise the device, 96
+  times a token. Removing it took the chain from 5.5 to 19.5 tok/s.
+- **Ablations taken while a constant dominates are noise.** Before that fix, ablating the whole
+  mixture changed the total by nothing, and the numbers were read as "the experts are free". They
+  were not; every ablation carried the same allocation cost, and the differences were noise around
+  a constant.
+
 ## 3b. The layer pipeline
 
 Read from the reference, because it is not a plain pre-norm block and the executor has to match it

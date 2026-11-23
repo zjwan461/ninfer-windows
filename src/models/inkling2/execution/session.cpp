@@ -631,6 +631,7 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
                          cudaMemcpyDeviceToHost), "routing indices");
         check(cudaMemcpy(routing.data(), s.router_weights, routing.size() * sizeof(float),
                          cudaMemcpyDeviceToHost), "routing weights");
+        if (routing_hook) { routing_hook(slot, indices, routing); }
         Tensor accumulator(s.moe_acc, DType::FP32, {kHidden, 1});
         check(cudaMemsetAsync(s.moe_acc, 0, std::size_t(kHidden) * 4, stream), "moe clear");
         for (int j = 0; j < kTopK; ++j) {
@@ -697,6 +698,7 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
         Tensor query(dense_tensor(weights, weights.index.output_query).data, DType::FP32,
                      {kHidden, 1});
         Tensor states(s.stack, DType::BF16, {kHidden, stack_length + 1});
+        if (stage_sink) { stage_sink(23, "final_states", s.stack, kHidden * (stack_length + 1)); }
         block_residual_read(query, states, kEps, vec(s.mlp_in, kHidden), stream);
         if (stage_sink) { stage_sink(23, "final_read", s.mlp_in, kHidden); }
         rmsnorm(vec(s.mlp_in, kHidden), dense_tensor(weights, weights.index.norm), kEps, false,

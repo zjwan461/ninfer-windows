@@ -65,8 +65,17 @@ int main(int argc, char** argv) {
         // Compare the first visit stage by stage against the model's own dump: a name mismatch
         // here is much easier to place than a wrong logit vector.
         int visits_seen = 0;
+        int comparisons = 0;
+        int missing = 0;
+        double worst_stage = 0.0;
+        int worst_layer = -1;
+        // The sink outlives this block: the step that drives it happens later, so everything it
+        // reads has to be declared out here.
+        std::vector<int> seen_per_layer(24, 0);
+        std::vector<double> layer_worst(24, 0.0);
+        int routing_flips = 0;
+        std::vector<std::string> layer_worst_stage(24);
         if (!reference_stages.empty()) {
-            std::vector<int> seen_per_layer(24, 0);
             session.stage_sink = [&](int layer, const char* name, void* buffer, int width) {
                 const int visit = layer;
                 const int occurrence = seen_per_layer[std::size_t(layer)] / 12;
@@ -74,6 +83,14 @@ int main(int argc, char** argv) {
                 const std::string stage(name);
                 const std::string file = "layer" + std::to_string(visit) + "." ;
                 (void)file;
+                if (stage == "final_states") {
+                    std::vector<std::uint16_t> host(static_cast<std::size_t>(width));
+                    cudaMemcpy(host.data(), buffer, host.size() * 2, cudaMemcpyDeviceToHost);
+                    std::ofstream out("/tmp/session_final_states.bin", std::ios::binary);
+                    out.write(reinterpret_cast<const char*>(host.data()),
+                              std::streamsize(host.size() * 2));
+                    return;
+                }
                 if (stage == "final" || stage == "final_read") {
                     std::vector<std::uint16_t> host(static_cast<std::size_t>(width));
                     cudaMemcpy(host.data(), buffer, host.size() * 2, cudaMemcpyDeviceToHost);
@@ -96,7 +113,11 @@ int main(int argc, char** argv) {
                 const auto candidate = reference_stages /
                     ("layer" + std::to_string(visit) + "." + mapped + "_0" +
                      std::to_string(occurrence) + ".bin");
-                if (!std::filesystem::exists(candidate)) { return; }
+                if (!std::filesystem::exists(candidate)) {
+                    if (missing < 3) { std::cout << "  missing " << candidate.string() << "\n"; }
+                    ++missing;
+                    return;
+                }
                 const auto expected = read_f32(candidate);
                 if (expected.size() != static_cast<std::size_t>(width)) { return; }
                 std::vector<std::uint16_t> host(static_cast<std::size_t>(width));
@@ -108,15 +129,47 @@ int main(int argc, char** argv) {
                     std::memcpy(&value, &bits, 4);
                     worst = std::max(worst, double(std::fabs(value - expected[i])));
                 }
-                if (worst > 0.2) {
-                    std::cout << "  layer " << visit << " pass " << occurrence << " " << stage
-                              << " max|err| " << worst << "\n";
+                ++comparisons;
+                if (worst > worst_stage) { worst_stage = worst; worst_layer = visit; }
+                if (worst > layer_worst[std::size_t(visit)]) {
+                    layer_worst[std::size_t(visit)] = worst;
+                    layer_worst_stage[std::size_t(visit)] = stage;
                 }
+            };
+        }
+        if (!reference_stages.empty()) {
+            session.routing_hook = [&](int visit, std::vector<std::int32_t>& indices,
+                                       std::vector<float>& weights) {
+                const auto path = oracle / ("route_" + std::to_string(visit) + ".txt");
+                if (!std::filesystem::exists(path)) { return; }
+                std::ifstream in(path);
+                std::vector<std::int32_t> ref_indices(8);
+                std::vector<float> ref_weights(8);
+                for (int j = 0; j < 8; ++j) { in >> ref_indices[std::size_t(j)]; }
+                for (int j = 0; j < 8; ++j) { in >> ref_weights[std::size_t(j)]; }
+                bool differs = false;
+                for (int j = 0; j < 8; ++j) {
+                    if (ref_indices[std::size_t(j)] != indices[std::size_t(j)]) { differs = true; }
+                }
+                if (differs) { ++routing_flips; }
+                indices = ref_indices;
+                weights = ref_weights;
             };
         }
         // One step runs every visit; the sink counts layers by the reading of the schedule.
         const auto logits = session.step(token, nullptr);
         (void)visits_seen;
+        if (!reference_stages.empty()) {
+            std::cout << "routing flips " << routing_flips << " of 48\n";
+            std::cout << "stage comparisons " << comparisons << " (missing references " << missing
+                      << "), worst " << worst_stage << " at layer " << worst_layer << "\n";
+            for (std::size_t layer = 0; layer < layer_worst.size(); ++layer) {
+                if (layer_worst[layer] > 0.5) {
+                    std::cout << "  layer " << layer << " worst " << layer_worst_stage[layer]
+                              << " " << layer_worst[layer] << "\n";
+                }
+            }
+        }
         if (cudaDeviceSynchronize() != cudaSuccess) {
             std::cerr << "FAIL: " << cudaGetErrorString(cudaGetLastError()) << "\n";
             return 1;

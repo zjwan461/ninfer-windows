@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <vector>
 
 namespace ninfer::models::inkling2::execution {
 
@@ -42,6 +43,12 @@ public:
     // Called with a stage name and its buffer after each intermediate is produced, so the parity
     // test can compare a live session against the recorded reference.
     std::function<void(int layer, const char*, void*, int)> stage_sink;
+
+    // Called with each visit's routed selection before the experts run. A parity test uses it to
+    // pin the selection to the reference's, because this model's router has near-ties and a flip
+    // would otherwise be indistinguishable from an arithmetic error.
+    std::function<void(int visit, std::vector<std::int32_t>& indices,
+                       std::vector<float>& weights)> routing_hook;
 
 private:
     struct Impl;

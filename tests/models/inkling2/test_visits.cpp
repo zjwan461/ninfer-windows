@@ -136,6 +136,7 @@ struct Scratch {
     void* msg_stack;  // [2, hidden] for the cross-pass message read
     void* res_f32;    // [hidden] FP32 residual accumulator
     void* moe_acc;    // [hidden] FP32 mixture accumulator
+    void* h_in;       // [hidden] the visit's input, copied out of the running state
     void* res_tmp;
     void* q_clip;
     void* k_clip;
@@ -172,7 +173,9 @@ struct Runner {
     int flips = 0;
     std::filesystem::path stage_fixture;
     std::filesystem::path write_stages;
-    bool ablate_moe = false;   // skip the routed experts, to measure what they cost  // per-stage reference buffers
+    bool ablate_moe = false;   // skip the routed experts, to measure what they cost
+    bool ablate_attn = false;  // skip attention and everything after it
+    bool ablate_router = false; // skip the routing readback, to see what the stalls cost  // per-stage reference buffers
     bool stage = false;
     int stage_layer = 0;
     void stage_compare(void* device, const char* suffix, int width = kHidden) {
@@ -228,6 +231,7 @@ struct Runner {
         s.q_clip = make(kQ); s.k_clip = make(kKv); s.v_norm = make(kKv); s.rel_clip = make(kRel);
         s.res_f32 = alloc(kHidden, 4);
         s.moe_acc = alloc(kHidden, 4);
+        s.h_in = alloc(kHidden, 2);
         s.res_tmp = alloc(kHidden, 4);
         s.ones = make(kKv);
         {
@@ -300,7 +304,7 @@ struct Runner {
         const bool boundary = (layer_index % 6) == 0;
 
         // The pre-layer state is what a boundary appends to the block stack.
-        void* h_in = alloc(kHidden, 2);
+        void* h_in = s.h_in;  // pre-allocated: a cudaMalloc per visit synchronises the device
         cudaMemcpy(h_in, s.h, kHidden * 2, cudaMemcpyDeviceToDevice);
 
         // ---- attention input: read out of the block stack -------------------------------
@@ -671,6 +675,7 @@ struct Runner {
                                   vec(s.attn_conv, kHidden), stream);
         }
 
+        if (ablate_attn) { return; }
         // ---- residual and the MLP read ---------------------------------------------------
         if (stage) {
             std::vector<std::uint16_t> a(static_cast<std::size_t>(kHidden) * 2);
@@ -782,8 +787,18 @@ struct Runner {
         }
         std::vector<std::int32_t> indices(kTopK);
         std::vector<float> routing(kTopK);
-        cudaMemcpy(indices.data(), s.indices, kTopK * sizeof(std::int32_t), cudaMemcpyDeviceToHost);
-        cudaMemcpy(routing.data(), s.router_weights, kTopK * sizeof(float), cudaMemcpyDeviceToHost);
+        if (ablate_router) {
+            // Ablation: a fixed selection with no device-to-host readback.
+            for (int j = 0; j < kTopK; ++j) {
+                indices[static_cast<std::size_t>(j)] = j;
+                routing[static_cast<std::size_t>(j)] = 1.0F;
+            }
+        } else {
+            cudaMemcpy(indices.data(), s.indices, kTopK * sizeof(std::int32_t),
+                       cudaMemcpyDeviceToHost);
+            cudaMemcpy(routing.data(), s.router_weights, kTopK * sizeof(float),
+                       cudaMemcpyDeviceToHost);
+        }
         // Routing is discrete and this model has near-ties, so a BF16-level difference can swap
         // the last expert. Read the reference's selection when it is available: it is either
         // forced (to check arithmetic) or merely compared (to count flips).
@@ -868,7 +883,6 @@ struct Runner {
         stage_compare(s.mlp_conv, "mlp.bin");
         residual_store_bf16(vec(s.h, kHidden), res_view, vec(s.mlp_conv, kHidden), stream);
         stage_compare(s.h, "out.bin");
-        cudaFree(h_in);
     }
 
     // Compares one device buffer against a float32 fixture and prints the worst element.
@@ -910,11 +924,15 @@ int main(int argc, char** argv) {
         std::filesystem::path stages;
         std::filesystem::path write_stages;
     bool ablate_moe = false;   // skip the routed experts, to measure what they cost
+    bool ablate_attn = false;  // skip attention and everything after it
+    bool ablate_router = false; // skip the routing readback, to see what the stalls cost
         std::filesystem::path routes;
         bool force_routing = false;
         bool zero_messages = false;
         bool zero_queries = false;
         bool runner_ablate_moe = false;
+        bool runner_ablate_attn = false;
+        bool runner_ablate_router = false;
         int seed_visit = -1;      // run exactly one visit, seeded from the oracle's inputs
         int bench_steps = 0;      // time the whole visit chain instead of checking it
 
@@ -931,6 +949,8 @@ int main(int argc, char** argv) {
             else if (arg == "--seed-visit" && i + 1 < argc) { seed_visit = std::stoi(argv[++i]); }
             else if (arg == "--bench" && i + 1 < argc) { bench_steps = std::stoi(argv[++i]); }
             else if (arg == "--ablate-moe") { runner_ablate_moe = true; }
+            else if (arg == "--ablate-attn") { runner_ablate_attn = true; }
+            else if (arg == "--ablate-router") { runner_ablate_router = true; }
             else { throw std::invalid_argument("unknown argument " + arg); }
         }
         // A benchmark needs only the artifact; the oracle drives the comparisons.
@@ -950,6 +970,8 @@ int main(int argc, char** argv) {
         if (!routes.empty()) { runner.route_dir = routes; }
         runner.force_routing = force_routing;
         runner.ablate_moe = runner_ablate_moe;
+        runner.ablate_attn = runner_ablate_attn;
+        runner.ablate_router = runner_ablate_router;
         runner.message_mode = zero_messages ? 1 : (zero_queries ? 2 : 0);
         if (!stages.empty() || !write_stages.empty()) {
             // Comparison and recording are separate switches: a run can record its own stages

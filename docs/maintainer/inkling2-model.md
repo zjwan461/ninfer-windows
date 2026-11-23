@@ -125,6 +125,9 @@ out = (out * sigmoid(Wgate x)) @ Wo                            # gate computed i
 is the `[16, 1024]` bank of bias-versus-distance profiles, and the two clip scales are the learned
 per-head multipliers applied before the clip.
 
+`ninfer::ops::head_rmsnorm` is the value path's normalisation: the same reduction as `rmsnorm`
+without a gain vector, which the checkpoint declares with `use_value_norm_no_gamma`.
+
 `ninfer::ops::dynamic_short_conv` covers the global-attention variant: the four taps are a static
 per-channel filter plus a per-token filter projected from the layer input and shared inside a
 key/value head, and the residual is divided by `sqrt(2 * kernel + 1) = 3` rather than `sqrt(5)`.

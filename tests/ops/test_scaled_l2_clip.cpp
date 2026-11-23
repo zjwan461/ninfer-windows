@@ -69,7 +69,7 @@ std::vector<double> oracle(const std::vector<std::uint16_t>& x,
     return out;
 }
 
-int run_case(const Case& c, float value_scale, std::uint32_t seed) {
+int run_case(const Case& c, float value_scale, std::uint32_t seed, bool in_place = false) {
     std::mt19937 rng(seed);
     std::normal_distribution<float> normal(0.0F, value_scale);
 
@@ -98,6 +98,12 @@ int run_case(const Case& c, float value_scale, std::uint32_t seed) {
     Tensor ts(ds, DType::BF16, {c.heads, c.head_dim});
     Tensor tp(dp, DType::I32, {c.rows});
     Tensor tout(dout, DType::BF16, {c.rows, c.heads * c.head_dim});
+    if (in_place) {
+        // The Op writes each head's elements after reading them, so exact aliasing is allowed and
+        // the result must not depend on it.
+        cudaMemcpy(dout, dx, x.size() * 2, cudaMemcpyDeviceToDevice);
+        tout = Tensor(dout, DType::BF16, {c.rows, c.heads * c.head_dim});
+    }
 
     ScaledL2ClipArgs args;
     args.rows = c.rows;
@@ -134,7 +140,8 @@ int run_case(const Case& c, float value_scale, std::uint32_t seed) {
         return 1;
     }
     std::cout << "case rows=" << c.rows << " head_dim=" << c.head_dim
-              << " tau=" << (c.tau_alpha > 0.0F ? "on" : "off") << ": max|err| " << worst << "\n";
+              << " tau=" << (c.tau_alpha > 0.0F ? "on" : "off")
+              << (in_place ? " in-place" : "") << ": max|err| " << worst << "\n";
     return 0;
 }
 
@@ -145,7 +152,9 @@ int main() {
         run_case(Case{5, 24, 128, 22.627417F, 0.1F, 8192.0F}, 2.5F, 2) ||
         run_case(Case{4, 24, 16, 8.0F, 0.0F, 0.0F}, 0.8F, 3) ||
         run_case(Case{4, 24, 16, 8.0F, 0.1F, 8192.0F}, 0.8F, 4) ||
-        run_case(Case{1, 8, 128, 22.627417F, 0.0F, 0.0F}, 0.01F, 5)) {
+        run_case(Case{1, 8, 128, 22.627417F, 0.0F, 0.0F}, 0.01F, 5) ||
+        run_case(Case{2, 8, 128, 22.627417F, 0.0F, 0.0F}, 4.0F, 6, true) ||
+        run_case(Case{2, 24, 16, 8.0F, 0.1F, 8192.0F}, 3.0F, 7, true)) {
         return 1;
     }
     std::cout << "ok: scaled L2 clip matches the FP64 oracle\n";

@@ -310,6 +310,15 @@ struct Runner {
         } else {
             cudaMemcpy(s.attn_in, h_in, kHidden * 2, cudaMemcpyDeviceToDevice);
         }
+        if (stage && stage_layer == 6) {
+            std::vector<std::uint16_t> a(3), b(3);
+            cudaMemcpy(a.data(), s.attn_in, 3 * 2, cudaMemcpyDeviceToHost);
+            cudaMemcpy(b.data(), h_in, 3 * 2, cudaMemcpyDeviceToHost);
+            std::cout << "      [visit " << visit_index << " layer 6] attn_in[0:3] "
+                      << from_bf16(a[0]) << " " << from_bf16(a[1]) << " " << from_bf16(a[2])
+                      << " h_in[0:3] " << from_bf16(b[0]) << " " << from_bf16(b[1]) << " "
+                      << from_bf16(b[2]) << " stack_len " << stack_length << "\n";
+        }
 
         // ---- cross-pass messages --------------------------------------------------------
         const bool uses_messages = pass > 0;
@@ -362,6 +371,13 @@ struct Runner {
             }
             Tensor message_query(msg_query, DType::FP32, {kHidden, 4});
             Tensor message_states(s.msg_stack, DType::BF16, {kHidden, 2});
+            if (stage) {
+                std::vector<std::uint16_t> a(static_cast<std::size_t>(kHidden) * 2);
+                cudaMemcpy(a.data(), s.attn_in, kHidden * 2, cudaMemcpyDeviceToHost);
+                std::ofstream out("/tmp/stage_attn_in_pre_" + std::to_string(stage_layer) + ".bin",
+                                  std::ios::binary);
+                out.write(reinterpret_cast<const char*>(a.data()), std::streamsize(kHidden * 2));
+            }
             Tensor message_out(s.message, DType::BF16, {kHidden, 4});
             block_residual_read(message_query, message_states, kEps, message_out, stream);
             if (message_mode == 1) {
@@ -369,6 +385,24 @@ struct Runner {
                 // the checkpoint has no tensor for them, so its messages may simply be the uniform
                 // mixture the zero query produces. Mode 1 forces that, mode 2 forces zero.
                 cudaMemset(s.message, 0, 4 * kHidden * 2);
+            }
+            if (stage) {
+                const auto path = stage_fixture /
+                    ("layer" + std::to_string(stage_layer) + "_message.bin");
+                if (std::filesystem::exists(path)) {
+                    std::vector<std::uint16_t> a(static_cast<std::size_t>(kHidden) * 4);
+                    cudaMemcpy(a.data(), s.message, a.size() * 2, cudaMemcpyDeviceToHost);
+                    const auto expected = read_f32(path);
+                    for (int r = 0; r < 4; ++r) {
+                        double worst = 0.0;
+                        for (int i = 0; i < kHidden; ++i) {
+                            worst = std::max(worst,
+                                std::fabs(double(from_bf16(a[std::size_t(r) * kHidden + i])) -
+                                          double(expected[std::size_t(r) * kHidden + i])));
+                        }
+                        std::cout << "      message row " << r << ": max|err| " << worst << "\n";
+                    }
+                }
             }
             // The queries are indexed by loop position; slice the [4, hidden] rows for this one.
             char* rows = static_cast<char*>(s.message);
@@ -387,6 +421,24 @@ struct Runner {
                 cudaMemcpy(s.k_in, s.attn_in, kHidden * 2, cudaMemcpyDeviceToDevice);
                 cudaMemcpy(s.v_in, s.attn_in, kHidden * 2, cudaMemcpyDeviceToDevice);
             }
+        }
+
+        if (stage && uses_messages) {
+            const auto dumpv = [&](void* device, const char* suffix) {
+                std::vector<std::uint16_t> a(static_cast<std::size_t>(kHidden));
+                cudaMemcpy(a.data(), device, a.size() * 2, cudaMemcpyDeviceToHost);
+                const auto path = stage_fixture / ("layer" + std::to_string(stage_layer) + "_" + suffix + ".bin");
+                if (!std::filesystem::exists(path)) { return; }
+                const auto expected = read_f32(path);
+                double worst = 0.0;
+                for (std::size_t i = 0; i < a.size(); ++i) {
+                    worst = std::max(worst, std::fabs(double(from_bf16(a[i])) - double(expected[i])));
+                }
+                std::cout << "      " << path.filename().string() << ": max|err| " << worst << "\n";
+            };
+            dumpv(s.q_in, "q_in");
+            dumpv(s.k_in, "k_in");
+            dumpv(s.v_in, "v_in");
         }
 
         // ---- per-stream norms -----------------------------------------------------------
@@ -440,7 +492,8 @@ struct Runner {
             stage_compare(s.k, "kbase.bin", kKv);
             Tensor dyn_k(s.dyn_k, DType::BF16, {32, 1});
             linear(vec(s.kn, kHidden), proj, dyn_k, stream);
-            if (stage) {
+            if (stage && std::filesystem::exists(stage_fixture /
+                    ("layer" + std::to_string(stage_layer) + "_dynk.bin"))) {
                 std::vector<std::uint16_t> a(32);
                 cudaMemcpy(a.data(), s.dyn_k, 32 * 2, cudaMemcpyDeviceToHost);
                 const auto expected = read_f32(stage_fixture /
@@ -495,7 +548,8 @@ struct Runner {
             Tensor state_in(s.v_state, DType::BF16, {kKv, 3});
             Tensor state_out(s.v_state_out, DType::BF16, {kKv, 3});
             Tensor dyn_v_row(s.dyn_v, DType::BF16, {32, 1});
-            if (stage) {
+            if (stage && std::filesystem::exists(stage_fixture /
+                    ("layer" + std::to_string(stage_layer) + "_dynv.bin"))) {
                 std::vector<std::uint16_t> a(32);
                 cudaMemcpy(a.data(), s.dyn_v, 32 * 2, cudaMemcpyDeviceToHost);
                 const auto expected = read_f32(stage_fixture /
@@ -838,28 +892,19 @@ int main(int argc, char** argv) {
         void* pre_loop_stack = alloc(8 * kHidden, 2);
         void* pre_loop_block = alloc(kHidden, 2);
         int pre_loop_stack_length = 0;
+        bool pre_loop_saved = false;
         // Pass 0 ends with the states later passes read their messages from.
         std::vector<std::uint16_t> previous_hidden;
-        int pass_seen = 0;
+        int pass_seen = -1;
 
         double worst = 0.0;
         int worst_visit = -1;
         for (std::size_t index = 0; index < schedule.visits.size(); ++index) {
             const auto& visit = schedule.visits[index];
-            runner.stage = !stages.empty() && visit.layer <= 5;
+            runner.stage = !stages.empty();
             runner.stage_layer = visit.layer;
             if (visit.pass != pass_seen) {
-                if (visit.pass == 0) {
-                    // Entering the core for the first time: keep the states a later pass restarts
-                    // from, and the block entry the messages will be read out of.
-                    cudaMemcpy(pre_loop_h, runner.s.h, kHidden * 2, cudaMemcpyDeviceToDevice);
-                    cudaMemcpy(pre_loop_stack, runner.s.stack, std::size_t(stack_length) * kHidden * 2,
-                               cudaMemcpyDeviceToDevice);
-                    pre_loop_stack_length = stack_length;
-                    cudaMemcpy(pre_loop_block, static_cast<char*>(runner.s.stack) +
-                                                   std::size_t(stack_length - 1) * kHidden * 2,
-                               kHidden * 2, cudaMemcpyDeviceToDevice);
-                } else {
+                if (visit.pass > 0) {
                     // A later pass: the pass that just finished supplies the messages, then the
                     // states restart from the pre-loop snapshot.
                     cudaMemcpy(previous_h, runner.s.h, kHidden * 2, cudaMemcpyDeviceToDevice);
@@ -873,6 +918,14 @@ int main(int argc, char** argv) {
                     stack_length = pre_loop_stack_length;
                 }
                 pass_seen = visit.pass;
+            }
+            if (visit.pass == 0 && visit.layer == 6 && !pre_loop_saved) {
+                // The pre-loop snapshot is the state entering the core, i.e. the first core visit.
+                cudaMemcpy(pre_loop_h, runner.s.h, kHidden * 2, cudaMemcpyDeviceToDevice);
+                cudaMemcpy(pre_loop_stack, runner.s.stack,
+                           std::size_t(stack_length) * kHidden * 2, cudaMemcpyDeviceToDevice);
+                pre_loop_stack_length = stack_length;
+                pre_loop_saved = true;
             }
             runner.run_visit(static_cast<int>(index), visit.layer, visit.pass, visit.layer - 6,
                              stack_length, previous_block, previous_h);

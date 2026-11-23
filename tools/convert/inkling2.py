@@ -87,14 +87,14 @@ def classify(name: str) -> Slot:
     rest = match.group("rest")
     component = rest.split(".", 1)[0]
     return Slot(name, f"text-{component}", layer, _core_visits(layer),
-                f"text.layers.{layer:02d}.{rest}", _store_for(name, layer))
+                f"text.layers.{layer}.{rest}", _store_for(name, layer))
 
 
 def _visual_slot(name: str, layer: int | None) -> str:
     rest = name[len("model.visual."):]
     if layer is None:
         return rest
-    return f"layers.{layer:02d}.{rest.split('.', 2)[2]}"
+    return f"layers.{layer}.{rest.split('.', 2)[2]}"
 
 
 @dataclass
@@ -532,14 +532,16 @@ def build_model(store, config: dict, names: list[str]):
 
     text = config["text_config"]
     experts = text["n_routed_experts"]
+    # The container reads `architectures` (one name) on the text component and a `target` on every
+    # companion, so the artifact states the same relationships the Hub checkpoint does.
     model = Model(components={
         "text": {"config": {
             **text,
-            "architecture": config["architectures"][0],
+            "architectures": config["architectures"],
             "loop_config": text["loop_config"],
         }},
-        "vision": {"config": config["vision_config"]},
-        "mtp": {"config": config["mtp_config"]},
+        "vision": {"config": config["vision_config"], "target": "text"},
+        "mtp": {"config": config["mtp_config"], "target": "text"},
     })
 
     for name in names:
@@ -564,6 +566,8 @@ def build_model(store, config: dict, names: list[str]):
         if info.dtype not in ("BF16", "F32"):
             raise ValueError(f"{name}: unexpected stored dtype {info.dtype}")
         target = classify(name).target.replace(".", "/")
+        if target.endswith("/weight"):  # the container names the parameter, not the file suffix
+            target = target[:-len("/weight")]
         model.add(Parameter(target, tuple(info.shape),
                             tensor_source(store, name, tuple(info.shape)),
                             direct_format="bf16" if info.dtype == "BF16" else "fp32"))

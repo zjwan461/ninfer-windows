@@ -236,7 +236,11 @@ std::uint32_t Config::global_layers() const noexcept {
 Config parse_config(const artifact::Directory& directory) {
     try {
         const auto& component = directory.component("text");
-        if (component.target != "text") { throw ArtifactError("text component must target text"); }
+        // `target` is optional in the container and means "this component consumes that one";
+        // the text backbone is the target, so it either omits it or names itself.
+        if (component.target && *component.target != "text") {
+            throw ArtifactError("text component must not target another component");
+        }
         const Json& config = component.config;
         // The six optional members are accepted because the checkpoint carries them, but nothing
         // in this architecture reads them: the sliding-window layers share the main head geometry

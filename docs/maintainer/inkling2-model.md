@@ -87,7 +87,7 @@ Per layer, from the checkpoint's tensor names:
 | `rel_logits_proj.proj`, `rel_l2_clip.scale`, `d_rel = 16`, `rel_extent = 1024` | learned relative-position bias of rank 16 over a 1024-token extent |
 | `q_l2_clip.scale` | L2 clip on q (threshold 22.627…), K clipped separately |
 | `attn_sink_proj.weight`, `gate_attn.weight` | attention sink logit and output gate |
-| `k_sconv.weight`, `v_sconv.weight`, `attn_sconv.weight`, `mlp_sconv.weight` | short convolutions, kernel 4 (`sconv_kernel_size`), one per sublayer stream |
+| `k_sconv`, `v_sconv`, `attn_sconv`, `mlp_sconv` | short convolutions, kernel 4. A sliding-window layer filters k and v directly (`[8x128, 1, 4]`); a global layer runs the same convolution in a learned 8x4 space (`weight_proj [32, 2304]`) over a fixed 4-tap filter (`static_w [4, 1024]`), so its layer has no `attn_norm` but three input norms instead |
 | `use_value_norm_no_gamma = true` | value normalisation without a learned gain |
 | `log_scaling_floor = 8192`, `alpha = 0.1` | log-scaled attention on the global layers |
 | `final_logit_softcapping = 30.0` | logit soft cap at the head |
@@ -221,9 +221,15 @@ Read-back against the source, not against the converter's own state:
 | `text/embed/weight` (bf16) | bit-exact |
 
 The artifact is a **slot bag**, not yet a model: every stored tensor is one logical parameter named
-after its source path (`text/layers/6/attn/wq_du.weight`, `text/layers/6/mlp/experts/7/w13`). The
-C++ model module of stage 2 binds those slots to the mathematics; nothing here presumes how the
-u/d factorisation composes.
+after its source path (`text/layers/6/attn/wq_du`, `text/layers/6/mlp/experts/7/w13`). The C++
+model module of stage 2 binds those slots to the mathematics; nothing here presumes how the u/d
+factorisation composes.
+
+Two naming facts the loader depends on: the trailing file suffix is dropped (`wq_du.weight` becomes
+`text/layers/6/attn/wq_du`), and layers are not zero-padded. The checkpoint also stores four
+`attn_res/attn_queries` rows as `[3, 2304]` instead of `[2304]` — layers 4, 10, 16 and 22, i.e. the
+layer before each global-attention layer. The loader encodes that rule; its meaning is still open
+and belongs with the block-residual mathematics in stage 2.
 
 ## 9. Drafter and vision (stage 4)
 
@@ -243,7 +249,9 @@ module that may reuse the ops but not the wiring.
 |---|---|
 | 0 | this document; `tools/convert/inkling2.py --check` passes on the real checkpoint metadata |
 | 1 | **met**: artifact written, NVFP4 slots read back at cos 0.99986 (9e-3 relative to FP32 rounding), bf16 slots bit-exact |
-| 2 | text-only, greedy, 8K: all 48 visit hidden states within the tolerance the vLLM write-up measured (≈ FlashAttention-vs-PyTorch divergence), short prompts token-identical to the reference. **Started**: `src/models/inkling2/config.cpp` parses and validates the artifact's text component (`visits = 48`, `kv_caches = 48`, `global_layers = 4`, core `[6,18)` × 3, `q_width = 3072`, `kv_width = 1024`, 128/8 experts, DSpark taps 5/23/41/48, vision depth 23); the registry recognises `Inkling2LoopForConditionalGeneration` / `inkling2_loop_text`. No loader, no kernels yet |
+| 2 | text-only, greedy, 8K: all 48 visit hidden states within the tolerance the vLLM write-up measured (≈ FlashAttention-vs-PyTorch divergence), short prompts token-identical to the reference. **Loader**: `load.cpp` derives all 6790 text slots from the config and validates the built artifact end to end — 7212 bindings, no missing slot, no unexpected one, every shape and stored format checked.
+
+**Started**: `config.cpp` parses and validates the text component (`visits = 48`, `kv_caches = 48`, `global_layers = 4`, core `[6,18)` × 3, `q_width = 3072`, `kv_width = 1024`, 128/8 experts, DSpark taps 5/23/41/48, vision depth 23); `load.cpp` derives all 6396 text slots from that config and checks every binding's shape and stored format against the artifact, rejecting missing and unexpected parameters. Registry recognises `Inkling2LoopForConditionalGeneration` / `inkling2_loop_text`. No materialisation, no kernels yet |
 | 3 | 48 KV + conv-state caches, 128K context on the 4080 SUPER, prefix reuse |
 | 4 | vision + DSpark; GSM8K and 32K perplexity within noise of the reference |
 | 5 | serving parity: chat template, reasoning effort, tool calls, `/v1/messages` |

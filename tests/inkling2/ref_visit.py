@@ -55,22 +55,34 @@ def merged_queries(f, loop_index):
     return merged  # [query, key, value, mlp]
 
 layer = int(sys.argv[1])
-loop_pass = int(sys.argv[2]) if len(sys.argv) > 2 else 1
+loop_pass = int(sys.argv[2]) if len(sys.argv) > 2 else 0
 sliding = layer not in FULL
 boundary = (layer % 6) == 0
+in_core = 6 <= layer < 18
 loop_index = layer - 6
 
 # The visits this one depends on, from the oracle's own recording.
 def visit_in(index):
     return np.fromfile(f'/tmp/oracle1/visit_in_{index}.bin', dtype=np.float32).astype(np.float64)
 
-pre_loop_h = visit_in(6)          # hidden entering the core
-pre_loop_b = visit_in(0)          # the block entry the prelude pushed
-prev_h = visit_in(18)             # hidden after the core's last layer
-prev_block = visit_in(12)         # block entry pushed at layer 12
+# Visit index of a layer visit: 6 prelude, then three passes of the core, then the coda.
+def visit_of(target_layer, target_pass):
+    if target_layer < 6:
+        return target_layer
+    if target_layer < 18:
+        return 6 + target_pass * 12 + (target_layer - 6)
+    # The coda runs after the core's last pass, so its visits start at 42.
+    return 42 + (target_layer - 18)
 
-h_in = pre_loop_h
-stack = [pre_loop_b]
+h_in = visit_in(visit_of(layer, loop_pass))
+if in_core:
+    stack = [visit_in(0)] if loop_pass == 0 else [visit_in(0)]
+    prev_h = visit_in(visit_of(17, loop_pass - 1) + 1) if loop_pass > 0 else None
+    prev_block = visit_in(12) if loop_pass > 0 else None
+else:
+    # After the core's last pass the block stack holds the pass-2 boundary entries.
+    stack = [visit_in(0), visit_in(visit_of(6, 2)), visit_in(visit_of(12, 2))]
+    prev_h = prev_block = None
 
 with safe_open(SHARD, framework='pt') as f:
     g = lambda n: f.get_tensor(f'model.llm.layers.{layer}.{n}').float().numpy()
@@ -86,7 +98,7 @@ with safe_open(SHARD, framework='pt') as f:
     attn_in_pre = attn_in.copy()
 
     # ---- cross-pass messages ---------------------------------------------------------------
-    if loop_pass > 0:
+    if loop_pass > 0 and in_core:
         mq = merged_queries(f, loop_index)
         msgs = read_block(mq, np.stack([prev_block, prev_h]))
         # The checkpoint names these controllers.{attn,k,v,mlp}; the reference renames them to
@@ -107,7 +119,7 @@ with safe_open(SHARD, framework='pt') as f:
         k_base = gate(k_base, msgs[1], 'k')
         v_base = gate(v_base, msgs[2], 'v')
 
-    if loop_pass > 0:
+    if loop_pass > 0 and in_core:
         w = lambda name, arr: np.ascontiguousarray(np.asarray(arr, dtype=np.float32).reshape(-1)).tofile(
             f'/tmp/stages/layer{layer}_{name}.bin')
         w('q_in', attn_in)
@@ -176,7 +188,7 @@ with safe_open(SHARD, framework='pt') as f:
         stack_mlp = stack + [residual]
     mq_in = f.get_tensor(f'model.llm.attn_res.mlp_queries.{layer}').float().numpy().reshape(1, 2304)
     mlp_in = read_block(mq_in, np.stack(stack_mlp))[0]
-    if loop_pass > 0:
+    if loop_pass > 0 and in_core:
         base = 'controllers.mlp'
         hh = (g(f'{base}.down_weight').astype(np.float64)
               @ np.concatenate([rms(mlp_in), rms(msgs[3])]))

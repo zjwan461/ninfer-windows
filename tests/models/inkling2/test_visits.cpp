@@ -20,6 +20,7 @@
 #include "ninfer/ops/moe_router.h"
 #include "ninfer/ops/relbias_attention.h"
 #include "ninfer/ops/rmsnorm.h"
+#include "ninfer/ops/residual.h"
 #include "ninfer/ops/scaled_l2_clip.h"
 #include "ninfer/ops/softcapped_swiglu.h"
 
@@ -132,6 +133,8 @@ struct Scratch {
     void* rms_x;
     void* rms_m;
     void* msg_stack;  // [2, hidden] for the cross-pass message read
+    void* res_f32;    // [hidden] FP32 residual accumulator
+    void* res_tmp;
     void* q_clip;
     void* k_clip;
     void* v_norm;
@@ -191,6 +194,8 @@ struct Runner {
         s.stack = make(8 * kHidden); s.message = make(4 * kHidden); s.msg_stack = make(2 * kHidden);
         s.concat = make(2 * kHidden); s.rms_x = make(kHidden); s.rms_m = make(kHidden);
         s.q_clip = make(kQ); s.k_clip = make(kKv); s.v_norm = make(kKv); s.rel_clip = make(kRel);
+        s.res_f32 = alloc(kHidden, 4);
+        s.res_tmp = alloc(kHidden, 4);
         s.ones = make(kKv);
         {
             std::vector<std::uint16_t> ones(static_cast<std::size_t>(kKv), to_bf16(1.0F));
@@ -642,17 +647,24 @@ struct Runner {
             out.write(reinterpret_cast<const char*>(a.data()), std::streamsize(a.size() * 2));
         }
         stage_compare(s.attn_conv, "attn.bin");
+        // The residual stays in FP32 the way the reference keeps it; only the layer output is
+        // rounded, so a value of magnitude 150 does not lose half a unit twice per layer.
         if (boundary) {
             // A boundary layer does not add its attention output to anything: it starts a new
             // block by pushing the pre-layer state, and that state is also the MLP's residual.
-            cudaMemcpy(s.gated_x, s.attn_conv, kHidden * 2, cudaMemcpyDeviceToDevice);
+            Tensor res(s.res_f32, DType::FP32, {kHidden, 1});
+            cast_bf16_to_f32(res, vec(s.attn_conv, kHidden), stream);
             cudaMemcpyAsync(static_cast<char*>(s.stack) + stack_length * kHidden * 2, h_in,
                             kHidden * 2, cudaMemcpyDeviceToDevice, stream);
             ++stack_length;
         } else {
-            cudaMemcpy(s.gated_x, h_in, kHidden * 2, cudaMemcpyDeviceToDevice);
-            accumulate(s.gated_x, s.attn_conv);
+            Tensor res(s.res_f32, DType::FP32, {kHidden, 1});
+            cast_bf16_to_f32(res, vec(h_in, kHidden), stream);
+            residual_add_f32(res, res, vec(s.attn_conv, kHidden), stream);
         }
+        // The block read consumes BF16 states, so the residual is rounded once on the way in.
+        Tensor res_view(s.res_f32, DType::FP32, {kHidden, 1});
+        cast_f32_to_bf16(vec(s.gated_x, kHidden), res_view, stream);
         // The MLP input is read from the block stack plus the residual, which sits on top of it.
         cudaMemcpyAsync(static_cast<char*>(s.stack) + stack_length * kHidden * 2, s.gated_x,
                         kHidden * 2, cudaMemcpyDeviceToDevice, stream);
@@ -825,8 +837,7 @@ struct Runner {
                       << from_bf16(a[2]) << "\n";
         }
         stage_compare(s.mlp_conv, "mlp.bin");
-        accumulate(s.gated_x, s.mlp_conv);
-        cudaMemcpy(s.h, s.gated_x, kHidden * 2, cudaMemcpyDeviceToDevice);
+        residual_store_bf16(vec(s.h, kHidden), res_view, vec(s.mlp_conv, kHidden), stream);
         stage_compare(s.h, "out.bin");
         cudaFree(h_in);
     }

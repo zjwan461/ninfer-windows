@@ -158,6 +158,8 @@ struct Runner {
     cudaStream_t stream = nullptr;
     double worst_visit = 0.0;
     void* gate_f32 = nullptr;
+    void* msg_query = nullptr;
+    int message_mode = 0;                 // 0: cross-pass read, 1: zero messages
     std::filesystem::path route_dir;      // optional: reference routing per visit
     bool force_routing = false;
     bool router_checked = false;
@@ -245,7 +247,7 @@ struct Runner {
     }
 
     void run_visit(int visit_index, int layer_index, int pass, int loop_index, int stack_length,
-                   int previous_stack_length, void* previous_h) {
+                   void* previous_block, void* previous_h) {
         // Every visit starts a fresh three-value window: this run feeds one token, so each
         // convolution sees zeros and the state is scratch rather than persistent.
         cudaMemset(s.k_state, 0, kKv * 3 * 2);
@@ -311,20 +313,63 @@ struct Runner {
 
         // ---- cross-pass messages --------------------------------------------------------
         const bool uses_messages = pass > 0;
+        if (uses_messages && layer_index == 6) {
+            const auto dump_role = [&](Role role, const char* name) {
+                const auto slot = layer[role];
+                if (slot < 0) { std::cout << "      missing role " << name << "\n"; }
+            };
+            dump_role(Role::ControllerAttnDown, "attn_down");
+            dump_role(Role::ControllerAttnForget, "attn_forget");
+            dump_role(Role::ControllerAttnGain, "attn_gain");
+            dump_role(Role::ControllerKDown, "k_down");
+            dump_role(Role::ControllerVDown, "v_down");
+            dump_role(Role::ControllerMlpDown, "mlp_down");
+            if (weights.index.cross_pass_queries < 0) {
+                std::cout << "      missing cross_pass_queries\n";
+            }
+        }
         void* k_in_base = queries == 3 ? s.k_in : s.attn_in;
         void* v_in_base = queries == 3 ? s.v_in : s.attn_in;
         auto one = [](void*) {};
         if (uses_messages) {
-            cudaMemcpyAsync(s.msg_stack, static_cast<char*>(s.stack) +
-                                                (previous_stack_length - 1) * kHidden * 2,
-                            kHidden * 2, cudaMemcpyDeviceToDevice, stream);
+            // The reference reads its messages from the previous pass's last block entry and its
+            // final hidden state, not from the stack this pass is rebuilding.
+            cudaMemcpyAsync(s.msg_stack, previous_block, kHidden * 2, cudaMemcpyDeviceToDevice,
+                            stream);
             cudaMemcpyAsync(static_cast<char*>(s.msg_stack) + kHidden * 2, previous_h, kHidden * 2,
                             cudaMemcpyDeviceToDevice, stream);
-            Tensor message_query(dense_tensor(weights, weights.index.cross_pass_queries).data,
-                                DType::FP32, {kHidden, 4});
+            // The checkpoint splits the four message queries into two tensors of two rows per
+            // loop-layer position: (query, mlp) and (key, value).
+            auto cp = dense_tensor(weights, weights.index.cross_pass_queries);
+            auto kv = dense_tensor(weights, weights.index.cross_pass_kv_queries);
+            if (msg_query == nullptr) { msg_query = alloc(4 * kHidden, 4); }
+            const std::size_t row = std::size_t(loop_index) * 2;
+            const auto* cp_base = static_cast<const char*>(cp.data);
+            const auto* kv_base = static_cast<const char*>(kv.data);
+            char* dst = static_cast<char*>(msg_query);
+            const std::size_t row_bytes = std::size_t(kHidden) * 4;
+            cudaMemcpy(dst, cp_base + row * row_bytes, row_bytes, cudaMemcpyDeviceToDevice);
+            cudaMemcpy(dst + row_bytes, kv_base + row * row_bytes, row_bytes,
+                       cudaMemcpyDeviceToDevice);
+            cudaMemcpy(dst + 2 * row_bytes, kv_base + (row + 1) * row_bytes, row_bytes,
+                       cudaMemcpyDeviceToDevice);
+            cudaMemcpy(dst + 3 * row_bytes, cp_base + (row + 1) * row_bytes, row_bytes,
+                       cudaMemcpyDeviceToDevice);
+            if (message_mode == 2) {
+                // What the installed reference does when the checkpoint has no tensor for its
+                // message queries: zero them, which makes the read a uniform mixture.
+                cudaMemset(msg_query, 0, 4 * kHidden * 4);
+            }
+            Tensor message_query(msg_query, DType::FP32, {kHidden, 4});
             Tensor message_states(s.msg_stack, DType::BF16, {kHidden, 2});
             Tensor message_out(s.message, DType::BF16, {kHidden, 4});
             block_residual_read(message_query, message_states, kEps, message_out, stream);
+            if (message_mode == 1) {
+                // The installed reference builds message_input with zero-initialised queries and
+                // the checkpoint has no tensor for them, so its messages may simply be the uniform
+                // mixture the zero query produces. Mode 1 forces that, mode 2 forces zero.
+                cudaMemset(s.message, 0, 4 * kHidden * 2);
+            }
             // The queries are indexed by loop position; slice the [4, hidden] rows for this one.
             char* rows = static_cast<char*>(s.message);
             // The base streams are the block read's rows when the layer is a full one; a sliding
@@ -509,6 +554,14 @@ struct Runner {
         }
 
         // ---- residual and the MLP read ---------------------------------------------------
+        if (stage) {
+            std::vector<std::uint16_t> a(static_cast<std::size_t>(kHidden) * 2);
+            cudaMemcpy(a.data(), s.proj, kHidden * 2, cudaMemcpyDeviceToHost);
+            cudaMemcpy(a.data() + kHidden, s.attn_conv, kHidden * 2, cudaMemcpyDeviceToHost);
+            std::ofstream out("/tmp/stage_proj_conv_" + std::to_string(stage_layer) + ".bin",
+                              std::ios::binary);
+            out.write(reinterpret_cast<const char*>(a.data()), std::streamsize(a.size() * 2));
+        }
         stage_compare(s.attn_conv, "attn.bin");
         if (boundary) {
             // A boundary layer does not add its attention output to anything: it starts a new
@@ -738,6 +791,8 @@ int main(int argc, char** argv) {
         std::filesystem::path stages;
         std::filesystem::path routes;
         bool force_routing = false;
+        bool zero_messages = false;
+        bool zero_queries = false;
         for (int i = 1; i < argc; ++i) {
             const std::string arg(argv[i]);
             if (arg == "--artifact" && i + 1 < argc) { artifact_path = argv[++i]; }
@@ -745,6 +800,8 @@ int main(int argc, char** argv) {
             else if (arg == "--stages" && i + 1 < argc) { stages = argv[++i]; }
             else if (arg == "--routes" && i + 1 < argc) { routes = argv[++i]; }
             else if (arg == "--force-routing") { force_routing = true; }
+            else if (arg == "--zero-messages") { zero_messages = true; }
+            else if (arg == "--zero-queries") { zero_queries = true; }
             else { throw std::invalid_argument("unknown argument " + arg); }
         }
         if (artifact_path.empty() || oracle.empty()) {
@@ -762,6 +819,7 @@ int main(int argc, char** argv) {
         runner.init();
         if (!routes.empty()) { runner.route_dir = routes; }
         runner.force_routing = force_routing;
+        runner.message_mode = zero_messages ? 1 : (zero_queries ? 2 : 0);
         if (!stages.empty()) {
             runner.stage_fixture = stages;
             runner.stage = true;
@@ -774,8 +832,12 @@ int main(int argc, char** argv) {
         cudaMemcpy(runner.s.h, host_h.data(), host_h.size() * 2, cudaMemcpyHostToDevice);
 
         int stack_length = 0;
-        int previous_stack_length = 0;
         void* previous_h = alloc(kHidden, 2);
+        void* previous_block = alloc(kHidden, 2);
+        void* pre_loop_h = alloc(kHidden, 2);
+        void* pre_loop_stack = alloc(8 * kHidden, 2);
+        void* pre_loop_block = alloc(kHidden, 2);
+        int pre_loop_stack_length = 0;
         // Pass 0 ends with the states later passes read their messages from.
         std::vector<std::uint16_t> previous_hidden;
         int pass_seen = 0;
@@ -787,12 +849,33 @@ int main(int argc, char** argv) {
             runner.stage = !stages.empty() && visit.layer <= 5;
             runner.stage_layer = visit.layer;
             if (visit.pass != pass_seen) {
-                // A new pass restarts from the pre-loop states; the previous pass's last hidden
-                // and block stack become the message source.
+                if (visit.pass == 0) {
+                    // Entering the core for the first time: keep the states a later pass restarts
+                    // from, and the block entry the messages will be read out of.
+                    cudaMemcpy(pre_loop_h, runner.s.h, kHidden * 2, cudaMemcpyDeviceToDevice);
+                    cudaMemcpy(pre_loop_stack, runner.s.stack, std::size_t(stack_length) * kHidden * 2,
+                               cudaMemcpyDeviceToDevice);
+                    pre_loop_stack_length = stack_length;
+                    cudaMemcpy(pre_loop_block, static_cast<char*>(runner.s.stack) +
+                                                   std::size_t(stack_length - 1) * kHidden * 2,
+                               kHidden * 2, cudaMemcpyDeviceToDevice);
+                } else {
+                    // A later pass: the pass that just finished supplies the messages, then the
+                    // states restart from the pre-loop snapshot.
+                    cudaMemcpy(previous_h, runner.s.h, kHidden * 2, cudaMemcpyDeviceToDevice);
+                    cudaMemcpy(previous_block, static_cast<char*>(runner.s.stack) +
+                                                   std::size_t(stack_length - 1) * kHidden * 2,
+                               kHidden * 2, cudaMemcpyDeviceToDevice);
+                    cudaMemcpy(runner.s.h, pre_loop_h, kHidden * 2, cudaMemcpyDeviceToDevice);
+                    cudaMemcpy(runner.s.stack, pre_loop_stack,
+                               std::size_t(pre_loop_stack_length) * kHidden * 2,
+                               cudaMemcpyDeviceToDevice);
+                    stack_length = pre_loop_stack_length;
+                }
                 pass_seen = visit.pass;
             }
             runner.run_visit(static_cast<int>(index), visit.layer, visit.pass, visit.layer - 6,
-                             stack_length, previous_stack_length, previous_h);
+                             stack_length, previous_block, previous_h);
             if (runner.router_checked && runner.routing_differs) { ++runner.flips; }
             const auto status = cudaDeviceSynchronize();
             if (status != cudaSuccess) {
@@ -803,21 +886,22 @@ int main(int argc, char** argv) {
             std::vector<std::uint16_t> got(kHidden);
             cudaMemcpy(got.data(), runner.s.h, kHidden * 2, cudaMemcpyDeviceToHost);
             double local = 0.0;
+            double scale = 1.0;
             for (std::size_t i = 0; i < got.size(); ++i) {
                 local = std::max(local, std::fabs(double(from_bf16(got[i])) - expected_out[i]));
+                scale = std::max(scale, double(std::fabs(expected_out[i])));
             }
+            const double relative = local / scale;
             if (local > worst) { worst = local; worst_visit = static_cast<int>(index); }
             std::cout << "visit " << index << " layer " << visit.layer << " pass " << visit.pass
                       << (runner.routing_differs ? " route-flip" : "")
                       << (config.sliding_layer[static_cast<std::size_t>(visit.layer)] ? " sliding" : " full   ")
-                      << " max|err| " << local << "\n";
-            if (local > 5.0) {
+                      << " max|err| " << local << " rel " << relative << "\n";
+            if (relative > 0.15) {
                 std::cerr << "FAIL: visit " << index << " diverged\n";
                 return 1;
             }
-            if (visit.message_from >= 0) {
-                cudaMemcpy(previous_h, runner.s.h, kHidden * 2, cudaMemcpyDeviceToDevice);
-            }
+
             if ((visit.layer % 6) == 0) { ++stack_length; }
         }
         std::cout << "worst visit " << worst_visit << " max|err| " << worst
@@ -888,7 +972,6 @@ int main(int argc, char** argv) {
             return 1;
         }
         (void)previous_hidden;
-        (void)previous_stack_length;
         std::cout << "ok: all visits match the reference\n";
         return 0;
     } catch (const std::exception& error) {

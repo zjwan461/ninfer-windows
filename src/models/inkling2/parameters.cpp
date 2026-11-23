@@ -179,6 +179,19 @@ Index build_index(const std::vector<BoundSlot>& slots, const Config& config) {
                 &slots_of_layer.controller_gain};
             assign((*rows[static_cast<std::size_t>(which)])[static_cast<std::size_t>(input)],
                    here, name);
+            // The dense controller arrays index by input (attn, k, v, mlp); the role table is what
+            // the executor addresses, so both views point at the same slot.
+            static constexpr Role kControllerRoles[3][4] = {
+                {Role::ControllerAttnDown, Role::ControllerKDown, Role::ControllerVDown,
+                 Role::ControllerMlpDown},
+                {Role::ControllerAttnForget, Role::ControllerKForget, Role::ControllerVForget,
+                 Role::ControllerMlpForget},
+                {Role::ControllerAttnGain, Role::ControllerKGain, Role::ControllerVGain,
+                 Role::ControllerMlpGain}};
+            assign(slots_of_layer.role[static_cast<std::size_t>(
+                       kControllerRoles[static_cast<std::size_t>(which)]
+                                       [static_cast<std::size_t>(input)])],
+                   here, name);
             continue;
         }
 

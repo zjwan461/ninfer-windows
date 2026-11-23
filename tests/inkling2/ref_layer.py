@@ -135,8 +135,9 @@ with safe_open(SHARD, framework='pt') as f:
     out = ((p[:, 0, None] * vv).reshape(-1) * gate).reshape(1, 3072)
     attn = out
     proj_out = (g('attn.wo_ud.weight').astype(np.float64) @ attn.reshape(-1)).reshape(1, 2304)
+    # tap 3 is the current token; a [2304,1] column here would broadcast into a 2304x2304 matrix
     sconv = g('attn_sconv.weight').reshape(2304, 4)
-    conv_out = (sconv[:, 3:4] * proj_out + proj_out) / np.sqrt(5.0)
+    conv_out = (sconv[:, 3] * proj_out.reshape(-1) + proj_out.reshape(-1)) / np.sqrt(5.0)
 
     w = lambda name, arr: np.ascontiguousarray(arr.reshape(-1), dtype=np.float32).tofile(
         f'/tmp/stages/layer{layer}_{name}.bin')

@@ -90,6 +90,24 @@ DSpark taps the hidden state at visits **5, 23, 41, 48** — i.e. end of prelude
 of pass 3, and the final output. `mtp_config.target_layer_ids = [5, 23, 41, 48]` confirms the
 visit numbering used here.
 
+## 3c. Message queries: the checkpoint's own layout
+
+The checkpoint stores the cross-pass queries as two `(2 * loop_layers, hidden)` tensors, and the
+reference merges them into one `(loop_layers, 4, hidden)`: per loop layer the four rows are
+**query, key, value, mlp**, taken as
+
+```
+queries    = cross_pass_queries.unflatten(0, (loop_layers, 2))     # [query, mlp]
+kv_queries = cross_pass_kv_queries.unflatten(0, (loop_layers, 2))  # [key, value]
+merged     = cat([queries[:, :1], kv_queries, queries[:, 1:]], dim=1)
+```
+
+That merge lives in `transformers.core_model_loading.Inkling2LoopMergeMessageQueries`, not in the
+modelling file, which is why reading only the model source leaves the message queries unaccounted
+for. The same file renames the controller weights: `controllers.{q,k,v,mlp}.down_weight` becomes
+`*_message_gate.down_proj.weight`, `gain_weight` becomes `message_gate_proj.weight` and
+`forget_weight` becomes `forget_gate_proj.weight`.
+
 ## 3b. The layer pipeline
 
 Read from the reference, because it is not a plain pre-norm block and the executor has to match it

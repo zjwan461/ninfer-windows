@@ -78,6 +78,12 @@ with safe_open(SHARD, framework='pt') as f:
         c2 = f.get_tensor('model.llm.layers.%d.mlp.experts.w2_weight' % layer)[e].view(torch.uint8).numpy()
         s2 = f.get_tensor('model.llm.layers.%d.mlp.experts.w2_weight_scale' % layer)[e].view(torch.uint8).numpy()
         w13 = dequant(c13, s13, float(w13_amax[e]), denom, 2304, 1152)
+        # The checkpoint stores the fused gate/up matrix row-interleaved: stored row s holds
+        # logical row s/2 for even s and half + (s-1)/2 for odd s.
+        half = 1152
+        order = np.where(np.arange(2304) < half, np.arange(2304) * 2,
+                         (np.arange(2304) - half) * 2 + 1)
+        w13 = w13[order]
         w2 = dequant(c2, s2, float(w2_amax[e]), denom, 2304, 576)
         up = w13 @ x
         gate_part, up_part = up[:1152], up[1152:]
@@ -86,6 +92,12 @@ with safe_open(SHARD, framework='pt') as f:
     conv_w = get('mlp_sconv.weight').float().numpy().reshape(2304, 4)[:, 3]
     mlp_out = (acc * conv_w + acc) / np.sqrt(5.0)
     out = residual + mlp_out
+    w = lambda name, arr: np.ascontiguousarray(np.asarray(arr).reshape(-1), dtype=np.float32).tofile(
+        f'/tmp/stages/layer{layer}_{name}.bin')
+    w('mlp_in', x)
+    w('mlp_pre', acc)
+    w('mlp', mlp_out)
+    w('out', out)
     np.save('/tmp/ref_mlp_out.npy', out.astype(np.float32))
     np.save('/tmp/ref_mlp_acc.npy', acc.astype(np.float32))
     print('moe out first3', np.round(acc[:3], 6))

@@ -165,10 +165,26 @@ times per token, not four.
 | Gate / up soft caps | 4.0 / 25.0 |
 | Expert weights | fused gate+up (`w13_weight`) and down (`w2_weight`) |
 
-`route_scale = 8` with `top-8` of 128 and no shared expert is a materially different router from
-the Qwen MoE path (which has a gated shared expert and no route scale). The existing
-`sparse_moe` kernels take the routing as input, so the router itself is a small addition; the
-soft caps belong inside the expert activation, not the router.
+Routing is sigmoid-scored, not softmax-scored (confirmed from the reference):
+
+```
+logits  = x . gate_weight                     # FP32, no bias on the logits
+scores  = sigmoid(logits)
+select  = top-8 of (scores + gate_bias)       # the bias only steers selection
+weights = scores[select] / (sum + 1e-20) * 8  # renormalised, then scaled by route_scale
+```
+
+`mlp.gate.bias` is that selection bias, not a logit bias, which is why it is stored in FP32 while
+the gate matrix is BF16. Expert outputs accumulate in FP32.
+
+The expert activation is a softcapped SwiGLU where the sigmoid sees the **raw** gate:
+
+```
+ideal = tanh(gate/4)*4 * sigmoid(gate) * tanh(up/25)*25
+```
+
+`ninfer::ops::softcapped_swiglu` implements it over the fused `[2 * inter, tokens]` projection and
+matches an FP64 oracle to 2.9e-3 on the real 1152 width.
 
 ## 6. Numerics in the checkpoint
 

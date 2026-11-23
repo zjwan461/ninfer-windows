@@ -1,5 +1,6 @@
 #include "models/inkling2/load.h"
 
+#include "artifact/binder.h"
 #include "artifact/schema.h"
 
 #include <set>
@@ -170,6 +171,21 @@ std::vector<BoundSlot> bind_parameters(const Directory& directory, const Config&
         bound.push_back(BoundSlot{slot.name, slot.shape, slot.format, entry.parts.front().object});
     }
     return bound;
+}
+
+QType weight_type(std::string_view format) {
+    if (format == kNvfp4) { return QType::NVFP4; }
+    if (format == kQ8) { return QType::Q8_G32_FP16; }
+    if (format == kBf16) { return QType::BF16; }
+    if (format == kFp32) { return QType::FP32; }
+    throw ArtifactError("Inkling2: unsupported stored format " + std::string(format));
+}
+
+void declare_parameters(artifact::Binder& binder, const Config& config) {
+    for (const auto& slot : expected_slots(config)) {
+        (void)binder.parameter(slot.name, slot.shape, artifact::Residency::Device,
+                               weight_type(slot.format));
+    }
 }
 
 void validate_parameters(const Directory& directory, const Config& config) {

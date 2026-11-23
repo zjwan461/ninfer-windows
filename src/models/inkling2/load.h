@@ -1,11 +1,17 @@
 #pragma once
 
 #include "artifact/schema.h"
+#include "core/weight.h"
 #include "models/inkling2/config.h"
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
+
+namespace ninfer::artifact {
+class Binder;
+}
 
 namespace ninfer::models::inkling2 {
 
@@ -39,5 +45,13 @@ struct BoundSlot {
 
 // bind_parameters plus the "no unexpected text parameter" check.
 void validate_parameters(const artifact::Directory& directory, const Config& config);
+
+// The stored-format name a slot carries, as the runtime weight type. Throws for a format this
+// architecture cannot execute.
+[[nodiscard]] QType weight_type(std::string_view format);
+
+// Declare every slot on the binder as a device-resident parameter of exactly its stored format.
+// This is the last host-only step before the materialiser allocates and uploads.
+void declare_parameters(artifact::Binder& binder, const Config& config);
 
 } // namespace ninfer::models::inkling2

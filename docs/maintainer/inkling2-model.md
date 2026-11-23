@@ -73,6 +73,10 @@ Visit schedule (index = position in the 48-visit sequence):
 | 30–41 | 6–17 (core) | 3 | 12 |
 | 42–47 | 18–23 (coda) | 1 | 6 |
 
+`build_schedule` materialises this table and every message link. The first core pass reads nothing;
+the 12 core layers read one message each on passes two and three, so a forward pass has 24 message
+reads, not 48 — the other 24 are the first-pass visits that start from the prelude output.
+
 DSpark taps the hidden state at visits **5, 23, 41, 48** — i.e. end of prelude, end of pass 2, end
 of pass 3, and the final output. `mtp_config.target_layer_ids = [5, 23, 41, 48]` confirms the
 visit numbering used here.
@@ -269,7 +273,10 @@ module that may reuse the ops but not the wiring.
 |---|---|
 | 0 | this document; `tools/convert/inkling2.py --check` passes on the real checkpoint metadata |
 | 1 | **met**: artifact written, NVFP4 slots read back at cos 0.99986 (9e-3 relative to FP32 rounding), bf16 slots bit-exact |
-| 2 | text-only, greedy, 8K: all 48 visit hidden states within the tolerance the vLLM write-up measured (≈ FlashAttention-vs-PyTorch divergence), short prompts token-identical to the reference. **Loader**: `load.cpp` derives all 6790 text slots from the config and validates the built artifact end to end — 7212 bindings, no missing slot, no unexpected one, every shape and stored format checked.
+| 2 | text-only, greedy, 8K: all 48 visit hidden states within the tolerance the vLLM write-up measured (≈ FlashAttention-vs-PyTorch divergence), short prompts token-identical to the reference. **Schedule**: `schedule.cpp` builds the 48 visits and the 24 message links, checked against the
+visit order the reference implementation actually produced.
+
+**Loader**: `load.cpp` derives all 6790 text slots from the config and validates the built artifact end to end — 7212 bindings, no missing slot, no unexpected one, every shape and stored format checked.
 
 **Started**: `config.cpp` parses and validates the text component (`visits = 48`, `kv_caches = 48`, `global_layers = 4`, core `[6,18)` × 3, `q_width = 3072`, `kv_width = 1024`, 128/8 experts, DSpark taps 5/23/41/48, vision depth 23); `load.cpp` derives all 6396 text slots from that config and checks every binding's shape and stored format against the artifact, rejecting missing and unexpected parameters. Registry recognises `Inkling2LoopForConditionalGeneration` / `inkling2_loop_text`. No materialisation, no kernels yet |
 | 3 | 48 KV + conv-state caches, 128K context on the 4080 SUPER, prefix reuse |

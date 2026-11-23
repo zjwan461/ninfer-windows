@@ -11,16 +11,23 @@ if(CMAKE_CUDA_ARCHITECTURES STREQUAL "89")
   set(NINFER_TARGET_COMPUTE_CAPABILITY 89)
 elseif(CMAKE_CUDA_ARCHITECTURES STREQUAL "120a")
   set(NINFER_TARGET_COMPUTE_CAPABILITY 120)
+elseif(CMAKE_CUDA_ARCHITECTURES STREQUAL "90" AND NINFER_ALLOW_UNQUALIFIED_ARCH)
+  # Testing only: Hopper has no FP4 tensor cores, so this build takes the same degraded route
+  # as sm_89. It is not a release target and no archive is packaged for it.
+  set(NINFER_TARGET_COMPUTE_CAPABILITY 90)
 else()
   message(FATAL_ERROR
     "NInfer supports CMAKE_CUDA_ARCHITECTURES=89 (Ada) or 120a (Blackwell); got "
-    "'${CMAKE_CUDA_ARCHITECTURES}'")
+    "'${CMAKE_CUDA_ARCHITECTURES}'. Set NINFER_ALLOW_UNQUALIFIED_ARCH=ON to build an "
+    "unsupported architecture for local testing.")
 endif()
 
 project(ninfer-windows LANGUAGES C CXX CUDA)
 
 # --- Global settings ---------------------------------------------------------
 option(NINFER_BUILD_APPS "Build the NInfer CLI, server and perplexity evaluator" ON)
+option(NINFER_ALLOW_UNQUALIFIED_ARCH
+  "Allow a compute capability other than 89/120a for local testing" OFF)
 option(BUILD_TESTING "Build NInfer tests" OFF)
 option(NINFER_BUILD_BENCHMARKS "Build NInfer benchmarks" OFF)
 
@@ -90,7 +97,13 @@ if(WIN32)
 else()
   set(NINFER_CUDART_TARGET CUDA::cudart)
 endif()
-if(WIN32 OR DEFINED VCPKG_TARGET_TRIPLET)
+option(NINFER_WITH_MEDIA "Link the FFmpeg media path (local headerless builds set this OFF)" ON)
+if(NOT NINFER_WITH_MEDIA)
+  # Local testing only: build the numeric core without the media path. No release target uses it.
+  add_library(ninfer_ffmpeg_dependencies INTERFACE)
+  set(NINFER_FFMPEG_TARGET ninfer_ffmpeg_dependencies)
+  add_library(ninfer_media_decode STATIC "${PROJECT_SOURCE_DIR}/src/media/stub.cpp")
+elseif(WIN32 OR DEFINED VCPKG_TARGET_TRIPLET)
   find_package(FFMPEG REQUIRED)
   add_library(ninfer_ffmpeg_dependencies INTERFACE)
   target_include_directories(ninfer_ffmpeg_dependencies INTERFACE ${FFMPEG_INCLUDE_DIRS})

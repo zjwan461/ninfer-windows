@@ -1,3 +1,7 @@
+if(NOT NINFER_WITH_MEDIA)
+  return()
+endif()
+
 add_library(ninfer_media_decode STATIC
   decode/decode.cpp
 )

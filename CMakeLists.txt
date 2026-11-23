@@ -17,7 +17,7 @@ else()
     "'${CMAKE_CUDA_ARCHITECTURES}'")
 endif()
 
-project(ninfer-sm89-windows LANGUAGES C CXX CUDA)
+project(ninfer-windows LANGUAGES C CXX CUDA)
 
 # --- Global settings ---------------------------------------------------------
 option(NINFER_BUILD_APPS "Build the NInfer CLI, server and perplexity evaluator" ON)

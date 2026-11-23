@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bash counterpart of scripts/package-release-v061-sm89.ps1.
+# Bash counterpart of scripts/package-release.ps1.
 #
 # This fork is delivered on Windows, so the Windows script is the one that ships. This script
 # packages the equivalent sm_89 Linux builds (the upstream fork's native platform) with the same
@@ -10,10 +10,11 @@
 # missing.
 set -euo pipefail
 
-release_tag='0.7.0'
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+# The repository VERSION is the product tag; the architecture token lives in the archive name.
+release_tag="$(tr -d '\r\n' < "$repo_root/VERSION")"
 dist_root="$repo_root/dist"
-product_name="ninfer-sm89-linux-x64-$release_tag"
+product_name="ninfer-linux-sm89-x64-$release_tag"
 product_root="$dist_root/$product_name"
 archive_name="$product_name.tar.gz"
 archive_path="$dist_root/$archive_name"

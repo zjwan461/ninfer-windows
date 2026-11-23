@@ -2,7 +2,7 @@
 
 This is the single authority for cutting a Windows release of this fork. The workflow that
 implements it is [.github/workflows/windows-release.yml](../../.github/workflows/windows-release.yml);
-the packaging itself is [scripts/package-release-v061-sm89.ps1](../../scripts/package-release-v061-sm89.ps1).
+the packaging itself is [scripts/package-release.ps1](../../scripts/package-release.ps1).
 
 ## What a release contains
 
@@ -11,7 +11,7 @@ One archive per target architecture, because the three compile-time profiles tog
 
 | Archive | Profiles |
 |---|---|
-| `ninfer-sm89-windows-x64-<version>.zip` | `sm128-rtx4090/`, `sm80-rtx4080s/` |
+| `ninfer-windows-sm89-x64-<version>.zip` | `sm128-rtx4090/`, `sm80-rtx4080s/` |
 | `ninfer-sm120-windows-x64-<version>.zip` | `sm36-rtx5060ti/` (Bonsai only) |
 
 Plus one `SHA256SUMS-v<version>-<arch>.txt` per archive. The `sm89` token in the first name is

@@ -264,7 +264,7 @@ build-4080s\apps\ninfer-perplexity.exe            困惑度评测
 build-4080s\apps\start-bonsai-rtx4080s.bat       启动脚本（80 SM 档；构建后自动随 exe 落位）
 build-4080s\apps\start-qwen38-rtx4080s.bat       启动脚本（80 SM 档；构建后自动随 exe 落位）
 ```
-> 启动脚本**按编译期档位各一份**（`start-bonsai-rtx4090.bat` / `start-qwen38-rtx4090.bat` 对应 128 SM，`-rtx4080s` 对应 80 SM，`start-bonsai-rtx5060ti.bat` 对应 36 SM），由 `apps/CMakeLists.txt` 的 `ninfer-serve` **POST_BUILD** 步骤按 `NINFER_TARGET_SM_COUNT` 自动把匹配的那几份拷到 exe 同目录（脚本内 `%~dp0ninfer-serve.exe` 由此解析）。各档脚本只差 `--prefill-chunk`（1408 / 1024 / 768）和 5060 Ti 档的 16 GB 上下文默认值。它们属于本 fork 的本地文件，缺失时不报错；本 fork 的打包脚本 `scripts/package-release-v061-sm89.ps1` 也会按档带上对应几份（上游的 v040/v050/v060 脚本保持原样，不涉及这些 bat）。
+> 启动脚本**按编译期档位各一份**（`start-bonsai-rtx4090.bat` / `start-qwen38-rtx4090.bat` 对应 128 SM，`-rtx4080s` 对应 80 SM，`start-bonsai-rtx5060ti.bat` 对应 36 SM），由 `apps/CMakeLists.txt` 的 `ninfer-serve` **POST_BUILD** 步骤按 `NINFER_TARGET_SM_COUNT` 自动把匹配的那几份拷到 exe 同目录（脚本内 `%~dp0ninfer-serve.exe` 由此解析）。各档脚本只差 `--prefill-chunk`（1408 / 1024 / 768）和 5060 Ti 档的 16 GB 上下文默认值。它们属于本 fork 的本地文件，缺失时不报错；本 fork 的打包脚本 `scripts/package-release.ps1` 也会按档带上对应几份（上游的 v040/v050/v060 脚本保持原样，不涉及这些 bat）。
 
 先看帮助与设备识别：
 ```bat
@@ -443,11 +443,11 @@ build-sm89.bat                    :: 默认 128 档，输出到 build-sm128
 
 前置：两档都已编译完成。128 档放 `build-4090`（脚本也接受默认目录 `build`），80 档放 `build-4080s`（即 §1 的 `-DNINFER_TARGET_SM_COUNT=80`）。然后：
 
-    powershell -ExecutionPolicy Bypass -File scripts\package-release-v061-sm89.ps1
+    powershell -ExecutionPolicy Bypass -File scripts\package-release.ps1
 
 产物（`dist/` 已被 `.gitignore` 忽略）：
 
-    dist\ninfer-sm89-windows-x64-0.7.0\
+    dist\ninfer-windows-sm89-x64-0.7.0\
       sm128-rtx4090\      exe + vcpkg DLL + VERSION + start-*.bat   （RTX 4090）
       sm80-rtx4080s\      exe + vcpkg DLL + VERSION + start-*-rtx4080s.bat  （RTX 4080 SUPER）
       README.md           哪张卡用哪个子目录
@@ -455,7 +455,7 @@ build-sm89.bat                    :: 默认 128 档，输出到 build-sm128
       ninfer-windows-build-manual.md
       LICENSE / VERSION
       SHA256SUMS.txt      包内所有文件的哈希
-    dist\ninfer-sm89-windows-x64-0.7.0.zip
+    dist\ninfer-windows-sm89-x64-0.7.0.zip
     dist\SHA256SUMS-v0.7.0-sm89.txt   zip 自身的哈希
 
 要点：
@@ -465,7 +465,7 @@ build-sm89.bat                    :: 默认 128 档，输出到 build-sm128
 - 启动脚本**按档分两份**并放进**各自的子目录**（不是根目录）：`sm128-rtx4090\` 放 `start-*-rtx4090.bat`，`sm80-rtx4080s\` 放 `start-*-rtx4080s.bat`（脚本靠 `%~dp0ninfer-serve.exe` 找同目录的 exe，所以不能只放根目录一份）。
 - 启动脚本的模型路径是**参数**而非硬编码：`start-bonsai-rtx4080s.bat <model.ninfer>`；不给参数时依次取 `NINFER_MODEL` → `NINFER_MODEL_DIR\<默认文件名>` → `models\<默认文件名>`，模型之后的参数原样透传（另可用 `NINFER_SERVE_ARGS`、`NINFER_SERVER`）。
 - `VERSION` 由脚本按包写：仓库根的 `VERSION` 是产品级标签（`0.7.0-sm89`），包内每个档位再戳上自己的卡名（`0.7.0-rtx4080s`），界面角标读的就是它。
-- 孪生的 Bash 脚本 `scripts/package-release-v061-sm89.sh` 打 Linux 版（仓库要求每个 `.ps1` 都有 `.sh` 配对）。
+- 孪生的 Bash 脚本 `scripts/package-release.sh` 打 Linux 版（仓库要求每个 `.ps1` 都有 `.sh` 配对）。
 
 ---
 
@@ -477,7 +477,7 @@ build-sm89.bat                    :: 默认 128 档，输出到 build-sm128
 
 | 正文占位符 | 作者机器上的值 |
 |---|---|
-| `<repo>` | `E:\workspaces\ai\ninfer-sm89-windows` |
+| `<repo>` | `E:\workspaces\ai\ninfer-windows` |
 | `<vcpkg-root>` | `E:\workspaces\c\vcpkg` |
 | `<cuda-path>` | `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.4` |
 | `<model-dir>` | `E:\LLM` |
@@ -507,7 +507,7 @@ setx VCPKG_ROOT E:\workspaces\c\vcpkg
 
 :: 1) 编译环境（或用开始菜单的「x64 Native Tools Command Prompt for VS 2022」）
 call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
-cd /d E:\workspaces\ai\ninfer-sm89-windows
+cd /d E:\workspaces\ai\ninfer-windows
 set "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.4"
 set "PATH=%CUDA_PATH%\bin;%PATH%"
 
@@ -523,7 +523,7 @@ cmake --build build-4080s -j
 
 :: 3) 直接运行即可：DLL 已由 app-local 复制到 build-4080s\apps\（见 §3 第 5 步）
 ::    仅当 exe 被拷到别处 / app-local 被关掉时，才需要这行兜底：
-:: set "PATH=E:\workspaces\ai\ninfer-sm89-windows\build-4080s\vcpkg_installed\x64-windows\bin;%CUDA_PATH%\bin;%PATH%"
+:: set "PATH=E:\workspaces\ai\ninfer-windows\build-4080s\vcpkg_installed\x64-windows\bin;%CUDA_PATH%\bin;%PATH%"
 ```
 
 一键脚本的等价调用（§8，可选）：

@@ -273,7 +273,7 @@ def test_split_extra_args(text: str, expected: list[str]) -> None:
 
 
 def test_engine_identity_prefers_variant_version(tmp_path: Path) -> None:
-    variant = tmp_path / "dist" / "ninfer-sm89-windows-x64-0.7.0" / "sm80-rtx4080s"
+    variant = tmp_path / "dist" / "ninfer-windows-sm89-x64-0.7.0" / "sm80-rtx4080s"
     variant.mkdir(parents=True)
     (variant / "VERSION").write_text("0.7.0-rtx4080s\n", encoding="utf-8")
     exe = variant / "ninfer-serve.exe"

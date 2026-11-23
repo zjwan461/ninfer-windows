@@ -144,11 +144,11 @@ std::vector<Slot> expected_slots(const Config& config) {
     return out.slots;
 }
 
-void validate_parameters(const Directory& directory, const Config& config) {
+std::vector<BoundSlot> bind_parameters(const Directory& directory, const Config& config) {
     const auto slots = expected_slots(config);
-    std::set<std::string, std::less<>> known;
+    std::vector<BoundSlot> bound;
+    bound.reserve(slots.size());
     for (const auto& slot : slots) {
-        known.insert(slot.name);
         const auto binding = directory.bindings.find(slot.name);
         if (binding == directory.bindings.end()) {
             throw ArtifactError("Inkling2: missing parameter " + slot.name);
@@ -167,7 +167,15 @@ void validate_parameters(const Directory& directory, const Config& config) {
             throw ArtifactError("Inkling2: " + slot.name + " is stored as " + object.format +
                                 ", expected " + slot.format);
         }
+        bound.push_back(BoundSlot{slot.name, slot.shape, slot.format, entry.parts.front().object});
     }
+    return bound;
+}
+
+void validate_parameters(const Directory& directory, const Config& config) {
+    const auto bound = bind_parameters(directory, config);
+    std::set<std::string, std::less<>> known;
+    for (const auto& slot : bound) { known.insert(slot.name); }
     for (const auto& [name, binding] : directory.bindings) {
         (void)binding;
         if (name.starts_with("text/") && !known.contains(name)) {

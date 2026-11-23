@@ -1,14 +1,11 @@
 #pragma once
 
+#include "artifact/schema.h"
 #include "models/inkling2/config.h"
 
 #include <cstdint>
 #include <string>
 #include <vector>
-
-namespace ninfer::artifact {
-struct Directory;
-}
 
 namespace ninfer::models::inkling2 {
 
@@ -27,7 +24,20 @@ inline constexpr std::uint32_t kPassThroughExperts = 20;
 
 [[nodiscard]] std::vector<Slot> expected_slots(const Config& config);
 
-// Throw when the artifact does not bind exactly these slots with these shapes and formats.
+// One resolved slot: the expectation plus the object that stores it. Resolving is the last step
+// before device materialisation, so it is pure host work and testable without CUDA.
+struct BoundSlot {
+    std::string name;
+    std::vector<std::uint64_t> shape;
+    std::string format;
+    artifact::ObjectHandle handle;
+};
+
+// Resolve every slot, throwing on a missing parameter, a wrong shape or a wrong stored format.
+[[nodiscard]] std::vector<BoundSlot> bind_parameters(const artifact::Directory& directory,
+                                                     const Config& config);
+
+// bind_parameters plus the "no unexpected text parameter" check.
 void validate_parameters(const artifact::Directory& directory, const Config& config);
 
 } // namespace ninfer::models::inkling2

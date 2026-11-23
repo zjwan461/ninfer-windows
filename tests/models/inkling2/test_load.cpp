@@ -120,12 +120,28 @@ int main(int argc, char** argv) {
             }
             DeviceContext device;
             auto weights = models::inkling2::materialize_text(reader, config, device);
-            require(weights.slots.size() == bound.size(), "materialised slot count differs");
+            require(weights.views.size() == bound.size(), "materialised slot count differs");
             require(weights.device_bytes == expected, "H2D did not cover every slot byte");
             require(weights.index.layers.size() == config.num_hidden_layers,
                     "role index does not follow the config");
+            std::size_t matrices = 0;
+            std::size_t dense = 0;
+            for (std::size_t position = 0; position < bound.size(); ++position) {
+                if (bound[position].shape.size() == 2) {
+                    const auto weight =
+                        models::inkling2::matrix_weight(weights, std::int32_t(position));
+                    require(weight.shape[0] > 0 && weight.shape[1] > 0,
+                            "a matrix weight came back without shape");
+                    ++matrices;
+                } else {
+                    const auto tensor =
+                        models::inkling2::dense_tensor(weights, std::int32_t(position));
+                    require(tensor.numel() > 0, "a dense slot came back empty");
+                    ++dense;
+                }
+            }
             std::cout << "materialised " << weights.device_bytes / (1024.0 * 1024.0 * 1024.0)
-                      << " GiB in " << weights.slots.size() << " weights, reserved "
+                      << " GiB, matrices " << matrices << ", dense " << dense << ", reserved "
                       << weights.reserved_bytes / (1024.0 * 1024.0 * 1024.0) << " GiB\n";
         }
         std::cout << "ok: 6790 slots, 48 visits, config validated\n";

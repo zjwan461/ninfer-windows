@@ -10,7 +10,9 @@
 
 namespace ninfer {
 struct DeviceContext;
+struct Tensor;
 struct Weight;
+struct WeightView;
 } // namespace ninfer
 
 namespace ninfer::artifact {
@@ -23,11 +25,20 @@ namespace ninfer::models::inkling2 {
 // `bind_parameters` produced, so `index` positions index into it directly.
 struct TextWeights {
     artifact::MaterializedArtifact backing;
-    std::vector<Weight> slots;
+    // Parallel to the order `bind_parameters` produced. A view is the artifact-side truth for
+    // every slot; the two helpers below turn it into the native form a kernel wants.
+    std::vector<WeightView> views;
     Index index;
     std::uint64_t device_bytes   = 0;
     std::uint64_t reserved_bytes = 0;
 };
+
+// A quantised or direct 2-D weight (projections, experts). Rejects other ranks on purpose: the
+// native Weight ABI only describes matrices.
+[[nodiscard]] Weight matrix_weight(const TextWeights& weights, std::int32_t slot);
+
+// A dense tensor of any rank (norms, biases, short-convolution kernels, embeddings).
+[[nodiscard]] Tensor dense_tensor(const TextWeights& weights, std::int32_t slot);
 
 // Materialise every text slot the artifact carries. The artifact stays the source of truth for
 // shapes and formats: the binder validates each declaration before any byte moves.

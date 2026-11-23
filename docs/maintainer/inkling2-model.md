@@ -419,6 +419,35 @@ output 2.0e-3 and the post-convolution output 3.9e-3 — all at BF16 storage rou
 | 4 | vision + DSpark; GSM8K and 32K perplexity within noise of the reference |
 | 5 | serving parity: chat template, reasoning effort, tool calls, `/v1/messages` |
 
+## 10b. NVFP4 storage, verified
+
+The NVFP4 container this repository reads (and this converter writes) is:
+
+```
+code plane   n*k/2 bytes            two E2M1 nibbles per byte, row-major along k
+scale plane  at align_up(n*k/2,256) n*k/16 bytes, one E4M3 scale per 16 values
+payload     both planes, then one float  (n*k/2 + n*k/16 + 4 for 2304x2304 = 2_985_988)
+```
+
+The scale plane is tiled `BlockScaleK16M128x4`, so its address for (row, group) is not
+`row*(k/16)+group`:
+
+```
+m_tile=row/128; inner=row%128; tile=group/4; lane=group&3
+offset = (m_tile*(k/64) + tile)*512 + (inner&31)*16 + (inner>>5)*4 + lane
+```
+
+`Weight::weight_scale_divisor` carries `denominator / amax` for that matrix, i.e. the dequantisation
+**divides** by it: `w = e2m1(code) * e4m3(scale) / divisor`. `Weight::input_scale_divisor` must be
+1 for this checkpoint, and nothing set it: every NVFP4 route rejected the converted weights with
+"invalid NVFP4 weight" until `materialize` passed 1.0. That is fixed and unrelated to which route
+runs.
+
+There is no tuned NVFP4 route for 2304x2304 or 2304x1152, and the runtime-extent NVFP4 decode
+route was written and then withdrawn: it disagreed with the dequantised experts by 1e26, i.e. it
+was wrong, and a wrong kernel in a table that dispatches silently is worse than a missing one.
+The layout facts above are what the next attempt starts from.
+
 ## 10a. The shape table and the generic route
 
 Every existing linear route is templated on a compile-time geometry and covers exactly one

@@ -48,7 +48,9 @@ Weight matrix_weight(const TextWeights& weights, std::int32_t slot) {
     if (slot < 0 || static_cast<std::size_t>(slot) >= weights.views.size()) {
         throw artifact::ArtifactError("Inkling2: weight slot out of range");
     }
-    return native_weight(weights.views[static_cast<std::size_t>(slot)]);
+    // The checkpoint is weight-only: activations are never scaled, so the input divisor that an
+    // NVFP4 route requires is exactly 1.
+    return native_weight(weights.views[static_cast<std::size_t>(slot)], 1.0F);
 }
 
 Tensor dense_tensor(const TextWeights& weights, std::int32_t slot) {

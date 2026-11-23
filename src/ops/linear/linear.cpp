@@ -100,6 +100,12 @@ void dispatch_linear(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy
         detail::q8_dispatch(x, w, out, policy, stream);
         return;
     case QType::BF16:
+        // A single token is decode: the tile kernel wastes 31 of every 32 threads there, so the
+        // shapes without a tuned route take the warp-per-row GEMV instead.
+        if (x.ne[1] == 1 && !detail::has_bf16_shape(w.n, w.k)) {
+            detail::launch_bf16_generic_gemv(x, w, out, stream);
+            return;
+        }
         detail::bf16_dispatch(x, w, out, policy, stream);
         return;
     case QType::NVFP4:

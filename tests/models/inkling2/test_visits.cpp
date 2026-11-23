@@ -171,7 +171,8 @@ struct Runner {
     bool routing_differs = false;
     int flips = 0;
     std::filesystem::path stage_fixture;
-    std::filesystem::path write_stages;  // per-stage reference buffers
+    std::filesystem::path write_stages;
+    bool ablate_moe = false;   // skip the routed experts, to measure what they cost  // per-stage reference buffers
     bool stage = false;
     int stage_layer = 0;
     void stage_compare(void* device, const char* suffix, int width = kHidden) {
@@ -818,6 +819,7 @@ struct Runner {
             std::cout << "      my mlp_in[0:3] " << from_bf16(a[0]) << " " << from_bf16(a[1]) << " "
                       << from_bf16(a[2]) << "\n";
         }
+        if (ablate_moe) { return; }  // ablation: everything after this point is skipped
         // The mixture accumulates in FP32 on the device: a host round trip per expert serialises
         // the pipeline behind eight synchronisations per visit.
         Tensor acc(s.moe_acc, DType::FP32, {kHidden, 1});
@@ -907,12 +909,15 @@ int main(int argc, char** argv) {
         std::filesystem::path oracle;
         std::filesystem::path stages;
         std::filesystem::path write_stages;
+    bool ablate_moe = false;   // skip the routed experts, to measure what they cost
         std::filesystem::path routes;
         bool force_routing = false;
         bool zero_messages = false;
         bool zero_queries = false;
+        bool runner_ablate_moe = false;
         int seed_visit = -1;      // run exactly one visit, seeded from the oracle's inputs
         int bench_steps = 0;      // time the whole visit chain instead of checking it
+
         for (int i = 1; i < argc; ++i) {
             const std::string arg(argv[i]);
             if (arg == "--artifact" && i + 1 < argc) { artifact_path = argv[++i]; }
@@ -925,6 +930,7 @@ int main(int argc, char** argv) {
             else if (arg == "--zero-queries") { zero_queries = true; }
             else if (arg == "--seed-visit" && i + 1 < argc) { seed_visit = std::stoi(argv[++i]); }
             else if (arg == "--bench" && i + 1 < argc) { bench_steps = std::stoi(argv[++i]); }
+            else if (arg == "--ablate-moe") { runner_ablate_moe = true; }
             else { throw std::invalid_argument("unknown argument " + arg); }
         }
         // A benchmark needs only the artifact; the oracle drives the comparisons.
@@ -943,6 +949,7 @@ int main(int argc, char** argv) {
         runner.init();
         if (!routes.empty()) { runner.route_dir = routes; }
         runner.force_routing = force_routing;
+        runner.ablate_moe = runner_ablate_moe;
         runner.message_mode = zero_messages ? 1 : (zero_queries ? 2 : 0);
         if (!stages.empty() || !write_stages.empty()) {
             // Comparison and recording are separate switches: a run can record its own stages

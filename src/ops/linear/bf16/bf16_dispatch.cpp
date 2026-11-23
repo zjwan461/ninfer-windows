@@ -37,4 +37,11 @@ void bf16_dispatch(const Tensor& x, const Weight& weight, Tensor& out, LinearPol
                    cudaStream_t stream) {
     select_bf16_launch(weight.n, weight.k, x.ne[1], policy)(x, weight, out, stream);
 }
+bool has_bf16_shape(std::int32_t n, std::int32_t k) {
+    for (const auto& shape : kShapes) {
+        if (shape.n == n && shape.k == k) { return true; }
+    }
+    return false;
+}
+
 } // namespace ninfer::ops::detail

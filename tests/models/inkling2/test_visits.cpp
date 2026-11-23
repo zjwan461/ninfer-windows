@@ -158,7 +158,11 @@ struct Runner {
     cudaStream_t stream = nullptr;
     double worst_visit = 0.0;
     void* gate_f32 = nullptr;
-    std::filesystem::path route_dir;      // optional: reference routing per layer
+    std::filesystem::path route_dir;      // optional: reference routing per visit
+    bool force_routing = false;
+    bool router_checked = false;
+    bool routing_differs = false;
+    int flips = 0;
     std::filesystem::path stage_fixture;  // per-stage reference buffers
     bool stage = false;
     int stage_layer = 0;
@@ -240,7 +244,7 @@ struct Runner {
                       vec(s.gain, kHidden), vec(out, kHidden), stream);
     }
 
-    void run_visit(int layer_index, int pass, int loop_index, int stack_length,
+    void run_visit(int visit_index, int layer_index, int pass, int loop_index, int stack_length,
                    int previous_stack_length, void* previous_h) {
         // Every visit starts a fresh three-value window: this run feeds one token, so each
         // convolution sees zeros and the state is scratch rather than persistent.
@@ -249,6 +253,8 @@ struct Runner {
         cudaMemset(s.attn_state, 0, kHidden * 3 * 2);
         cudaMemset(s.mlp_state, 0, kHidden * 3 * 2);
 
+        router_checked = false;
+        routing_differs = false;
         const auto& layer = weights.index.layers[static_cast<std::size_t>(layer_index)];
         const bool sliding = config.sliding_layer[static_cast<std::size_t>(layer_index)];
         const bool boundary = (layer_index % 6) == 0;
@@ -386,12 +392,34 @@ struct Runner {
         } else {
             // dynamic: taps = static[4, C] + weight_proj(hidden) per head
             auto proj = matrix_weight(weights, layer[Role::KSconvProj]);
+            stage_compare(s.k, "kbase.bin", kKv);
             Tensor dyn_k(s.dyn_k, DType::BF16, {32, 1});
             linear(vec(s.kn, kHidden), proj, dyn_k, stream);
+            if (stage) {
+                std::vector<std::uint16_t> a(32);
+                cudaMemcpy(a.data(), s.dyn_k, 32 * 2, cudaMemcpyDeviceToHost);
+                const auto expected = read_f32(stage_fixture /
+                    ("layer" + std::to_string(stage_layer) + "_dynk.bin"));
+                double worst = 0.0;
+                for (std::size_t i = 0; i < 32; ++i) {
+                    worst = std::max(worst, std::fabs(double(from_bf16(a[i])) - expected[i]));
+                }
+                std::cout << "      layer" << stage_layer << "_dynk.bin: max|err| " << worst
+                          << " (mine " << from_bf16(a[0]) << " ref " << expected[0] << ")\n";
+            }
             auto static_w = dense_tensor(weights, layer[Role::KSconvStatic]);
             Tensor static_4c(static_w.data, DType::BF16, {4, kKv});
             Tensor state_in(s.k_state, DType::BF16, {kKv, 3});
             Tensor state_out(s.k_state_out, DType::BF16, {kKv, 3});
+            if (stage) {
+                std::vector<std::uint16_t> a(4);
+                cudaMemcpy(a.data(), s.k, 4 * 2, cudaMemcpyDeviceToHost);
+                std::vector<std::uint16_t> b(32);
+                cudaMemcpy(b.data(), s.dyn_k, 32 * 2, cudaMemcpyDeviceToHost);
+                std::cout << "      kbase[0:4]" << from_bf16(a[0]) << " " << from_bf16(a[1]) << " "
+                          << from_bf16(a[2]) << " " << from_bf16(a[3])
+                          << " dyn[3] " << from_bf16(b[3]) << "\n";
+            }
             Tensor dyn_k_row(s.dyn_k, DType::BF16, {32, 1});
             dynamic_short_conv(vec(s.k, kKv), static_4c, dyn_k_row, state_in, state_out,
                                vec(s.k_conv, kKv), 8, stream);
@@ -414,6 +442,7 @@ struct Runner {
                                   stream);
         } else {
             auto proj = matrix_weight(weights, layer[Role::VSconvProj]);
+            stage_compare(s.v, "vbase.bin", kKv);
             Tensor dyn_v(s.dyn_v, DType::BF16, {32, 1});
             linear(vec(s.vn, kHidden), proj, dyn_v, stream);
             auto static_w = dense_tensor(weights, layer[Role::VSconvStatic]);
@@ -421,8 +450,20 @@ struct Runner {
             Tensor state_in(s.v_state, DType::BF16, {kKv, 3});
             Tensor state_out(s.v_state_out, DType::BF16, {kKv, 3});
             Tensor dyn_v_row(s.dyn_v, DType::BF16, {32, 1});
+            if (stage) {
+                std::vector<std::uint16_t> a(32);
+                cudaMemcpy(a.data(), s.dyn_v, 32 * 2, cudaMemcpyDeviceToHost);
+                const auto expected = read_f32(stage_fixture /
+                    ("layer" + std::to_string(stage_layer) + "_dynv.bin"));
+                double worst = 0.0;
+                for (std::size_t i = 0; i < 32; ++i) {
+                    worst = std::max(worst, std::fabs(double(from_bf16(a[i])) - expected[i]));
+                }
+                std::cout << "      layer" << stage_layer << "_dynv.bin: max|err| " << worst << "\n";
+            }
             dynamic_short_conv(vec(s.v, kKv), static_4c, dyn_v_row, state_in, state_out,
                                vec(s.v_conv, kKv), 8, stream);
+            stage_compare(s.v_conv, "vconv.bin", kKv);
         }
         Tensor v_in_t(s.v_conv, DType::BF16, {128, 8});
         Tensor v_out_t(s.v_norm, DType::BF16, {128, 8});
@@ -565,17 +606,28 @@ struct Runner {
         std::vector<float> routing(kTopK);
         cudaMemcpy(indices.data(), s.indices, kTopK * sizeof(std::int32_t), cudaMemcpyDeviceToHost);
         cudaMemcpy(routing.data(), s.router_weights, kTopK * sizeof(float), cudaMemcpyDeviceToHost);
+        // Routing is discrete and this model has near-ties, so a BF16-level difference can swap
+        // the last expert. Read the reference's selection when it is available: it is either
+        // forced (to check arithmetic) or merely compared (to count flips).
+        bool routing_differs = false;
         if (!route_dir.empty()) {
-            // The reference's own selection: routing is a discrete function and this model has
-            // near-ties, so the MoE arithmetic has to be checked on a fixed selection.
-            const auto path = route_dir / ("ref_route_" + std::to_string(layer_index) + ".json");
+            const auto path = route_dir / ("route_" + std::to_string(visit_index) + ".txt");
             if (std::filesystem::exists(path)) {
-                const auto json = artifact::parse_json(read_text(path), "route");
+                std::ifstream stream(path);
+                std::vector<std::int32_t> ref_indices(kTopK);
+                std::vector<float> ref_weights(kTopK);
+                for (int j = 0; j < kTopK; ++j) { stream >> ref_indices[static_cast<std::size_t>(j)]; }
+                for (int j = 0; j < kTopK; ++j) { stream >> ref_weights[static_cast<std::size_t>(j)]; }
                 for (int j = 0; j < kTopK; ++j) {
-                    indices[static_cast<std::size_t>(j)] = json.at("indices")[j].get<std::int32_t>();
-                    routing[static_cast<std::size_t>(j)] =
-                        static_cast<float>(json.at("weights")[j].get<double>());
+                    if (ref_indices[static_cast<std::size_t>(j)] != indices[static_cast<std::size_t>(j)]) {
+                        routing_differs = true;
+                    }
                 }
+                if (force_routing) {
+                    indices = ref_indices;
+                    routing = ref_weights;
+                }
+                router_checked = true;
             }
         }
         if (stage) {
@@ -685,12 +737,14 @@ int main(int argc, char** argv) {
         std::filesystem::path oracle;
         std::filesystem::path stages;
         std::filesystem::path routes;
+        bool force_routing = false;
         for (int i = 1; i < argc; ++i) {
             const std::string arg(argv[i]);
             if (arg == "--artifact" && i + 1 < argc) { artifact_path = argv[++i]; }
             else if (arg == "--oracle" && i + 1 < argc) { oracle = argv[++i]; }
             else if (arg == "--stages" && i + 1 < argc) { stages = argv[++i]; }
             else if (arg == "--routes" && i + 1 < argc) { routes = argv[++i]; }
+            else if (arg == "--force-routing") { force_routing = true; }
             else { throw std::invalid_argument("unknown argument " + arg); }
         }
         if (artifact_path.empty() || oracle.empty()) {
@@ -707,6 +761,7 @@ int main(int argc, char** argv) {
         Runner runner{weights, config};
         runner.init();
         if (!routes.empty()) { runner.route_dir = routes; }
+        runner.force_routing = force_routing;
         if (!stages.empty()) {
             runner.stage_fixture = stages;
             runner.stage = true;
@@ -729,15 +784,16 @@ int main(int argc, char** argv) {
         int worst_visit = -1;
         for (std::size_t index = 0; index < schedule.visits.size(); ++index) {
             const auto& visit = schedule.visits[index];
-            runner.stage = !stages.empty() && visit.layer <= 2;
+            runner.stage = !stages.empty() && visit.layer <= 5;
             runner.stage_layer = visit.layer;
             if (visit.pass != pass_seen) {
                 // A new pass restarts from the pre-loop states; the previous pass's last hidden
                 // and block stack become the message source.
                 pass_seen = visit.pass;
             }
-            runner.run_visit(visit.layer, visit.pass, visit.layer - 6,
+            runner.run_visit(static_cast<int>(index), visit.layer, visit.pass, visit.layer - 6,
                              stack_length, previous_stack_length, previous_h);
+            if (runner.router_checked && runner.routing_differs) { ++runner.flips; }
             const auto status = cudaDeviceSynchronize();
             if (status != cudaSuccess) {
                 std::cerr << "visit " << index << ": " << cudaGetErrorString(status) << "\n";
@@ -752,6 +808,7 @@ int main(int argc, char** argv) {
             }
             if (local > worst) { worst = local; worst_visit = static_cast<int>(index); }
             std::cout << "visit " << index << " layer " << visit.layer << " pass " << visit.pass
+                      << (runner.routing_differs ? " route-flip" : "")
                       << (config.sliding_layer[static_cast<std::size_t>(visit.layer)] ? " sliding" : " full   ")
                       << " max|err| " << local << "\n";
             if (local > 5.0) {
@@ -763,7 +820,69 @@ int main(int argc, char** argv) {
             }
             if ((visit.layer % 6) == 0) { ++stack_length; }
         }
-        std::cout << "worst visit " << worst_visit << " max|err| " << worst << "\n";
+        std::cout << "worst visit " << worst_visit << " max|err| " << worst
+                  << ", routing flips " << runner.flips << "\n";
+
+        // ---- final read, norm and unembed -------------------------------------------------
+        // The model ends by reading the finished block stack with one learned query, normalising
+        // and projecting onto the vocabulary with a tanh softcap of 30.
+        const auto logits_path = oracle / "logits.bin";
+        if (std::filesystem::exists(logits_path)) {
+            Tensor final_query(dense_tensor(weights, weights.index.output_query).data,
+                               DType::FP32, {kHidden, 1});
+            Tensor final_states(runner.s.stack, DType::BF16, {kHidden, stack_length + 2});
+            cudaMemcpyAsync(static_cast<char*>(runner.s.stack) + (stack_length + 1) * kHidden * 2,
+                            runner.s.h, kHidden * 2, cudaMemcpyDeviceToDevice, nullptr);
+            Tensor final_out(runner.s.mlp_in, DType::BF16, {kHidden, 1});
+            block_residual_read(final_query, final_states, kEps, final_out, nullptr);
+            Tensor top(runner.s.gated_x, DType::BF16, {kHidden, 1});
+            rmsnorm(final_out, dense_tensor(weights, weights.index.norm), kEps, false, top, nullptr);
+
+            auto unembed = matrix_weight(weights, weights.index.unembed);
+            const int vocab = unembed.n;
+            void* d_logits = nullptr;
+            cudaMalloc(&d_logits, std::size_t(vocab) * 2);
+            Tensor logits_out(d_logits, DType::BF16, {vocab, 1});
+            linear(top, unembed, logits_out, nullptr);
+            const auto status = cudaDeviceSynchronize();
+            if (status != cudaSuccess) {
+                std::cerr << "unembed: " << cudaGetErrorString(status) << "\n";
+                return 1;
+            }
+            std::vector<std::uint16_t> host_logits(static_cast<std::size_t>(vocab));
+            cudaMemcpy(host_logits.data(), d_logits, host_logits.size() * 2,
+                       cudaMemcpyDeviceToHost);
+            const auto reference_logits = read_f32(logits_path);
+            std::vector<int> mine(vocab), refs(vocab);
+            for (int i = 0; i < vocab; ++i) { mine[static_cast<std::size_t>(i)] = i; }
+            for (int i = 0; i < vocab; ++i) { refs[static_cast<std::size_t>(i)] = i; }
+            auto by_value = [&](std::vector<int> idx, auto value) {
+                std::partial_sort(idx.begin(), idx.begin() + 5, idx.end(),
+                                  [&](int a, int b) { return value(a) > value(b); });
+                return std::vector<int>(idx.begin(), idx.begin() + 5);
+            };
+            const auto my_top = by_value(mine, [&](int i) {
+                return from_bf16(host_logits[static_cast<std::size_t>(i)]); });
+            const auto ref_top = by_value(refs, [&](int i) {
+                return reference_logits[static_cast<std::size_t>(i)]; });
+            std::cout << "top5 mine:";
+            for (int id : my_top) { std::cout << " " << id; }
+            std::cout << "\ntop5 ref :";
+            for (int id : ref_top) { std::cout << " " << id; }
+            std::cout << "\n";
+            double worst_logit = 0.0;
+            for (int i = 0; i < vocab; ++i) {
+                worst_logit = std::max(worst_logit,
+                                       std::fabs(double(from_bf16(host_logits[static_cast<std::size_t>(i)])) -
+                                                 double(reference_logits[static_cast<std::size_t>(i)])));
+            }
+            std::cout << "logits max|err| " << worst_logit << "\n";
+            cudaFree(d_logits);
+            if (my_top[0] != ref_top[0]) {
+                std::cerr << "FAIL: top-1 token differs\n";
+                return 1;
+            }
+        }
         if (worst > 5.0e-2) {
             std::cerr << "FAIL: tolerance exceeded\n";
             return 1;

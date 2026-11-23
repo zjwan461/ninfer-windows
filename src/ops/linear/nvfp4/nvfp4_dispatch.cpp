@@ -42,4 +42,11 @@ void nvfp4_dispatch(const Tensor& x, const Weight& weight, Tensor& out, LinearPo
     const auto scratch = allocate_nvfp4_w4a4_workspace(*workspace, x.ne[1], weight.k);
     shape.a4(x, weight, out, scratch, stream);
 }
+bool has_nvfp4_shape(std::int32_t n, std::int32_t k) {
+    for (const auto* shape : kShapes) {
+        if (shape->n == n && shape->k == k) { return true; }
+    }
+    return false;
+}
+
 } // namespace ninfer::ops::detail

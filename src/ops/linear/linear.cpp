@@ -4,6 +4,8 @@
 #include "ops/linear/bf16/bf16_dispatch.h"
 #include "ops/linear/fp8/fp8_dispatch.h"
 #include "ops/linear/nvfp4/nvfp4_dispatch.h"
+#include "ops/linear/nvfp4/nvfp4_format.h"
+#include "ops/linear/nvfp4/nvfp4_launch.h"
 #include "ops/linear/q4/q4_dispatch.h"
 #include "ops/linear/q5/q5_dispatch.h"
 #include "ops/linear/q6/q6_dispatch.h"
@@ -94,6 +96,13 @@ void dispatch_linear(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy
         detail::bf16_dispatch(x, w, out, policy, stream);
         return;
     case QType::NVFP4:
+        // A shape outside the tuned table still has to run; the generic decode route covers any
+        // extents for a single token.
+        if (x.ne[1] == 1 && !detail::has_nvfp4_shape(w.n, w.k)) {
+            detail::validate_nvfp4_weight(w, "nvfp4 linear");
+            detail::launch_nvfp4_generic_gemv(x, w, out, stream);
+            return;
+        }
         detail::nvfp4_dispatch(x, w, out, policy, workspace, stream);
         return;
     case QType::FP8_E4M3FN_ROW_BF16:

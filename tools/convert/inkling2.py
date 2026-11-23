@@ -394,17 +394,44 @@ def expert_source(store, layer: int, weight: str, expert: int):
     scale_rows, scale_cols = store.describe(scale_name).shape[1:]
     scale_begin = expert * scale_rows * scale_cols
 
+    # The fused gate/up projection is stored gate/up interleaved: stored row s holds logical row
+    # s/2 for even s and half + (s-1)/2 for odd s. The down projection is stored in logical order.
+    # Passing the interleaved order through produced an artifact whose expert matrices were a row
+    # permutation of the reference's, which every expert GEMM would have silently multiplied.
+    def stored_order(rows_in: int) -> torch.Tensor | None:
+        if weight != "w13_weight":
+            return None
+        half = rows_in // 2
+        index = torch.arange(rows_in)
+        return torch.where(index < half, index * 2, (index - half) * 2 + 1)
+
+    order = stored_order(rows)
+    block_cache: dict[str, torch.Tensor] = {}
+
+    def rows_of(name_: str, begin_: int, count_: int, width: int, cache_key: str):
+        block = block_cache.get(cache_key)
+        if block is None:
+            block = store.read_flat(name_, begin_, begin_ + count_ * width).view(
+                torch.uint8).reshape(count_, width)
+            block_cache[cache_key] = block
+        return block
+
     def codes(begin_row: int, end_row: int):
-        start = begin + begin_row * cols
-        count = (end_row - begin_row) * cols
-        return store.read_flat(name, start, start + count).view(torch.uint8).reshape(
-            end_row - begin_row, cols)
+        if order is None:
+            start = begin + begin_row * cols
+            count = (end_row - begin_row) * cols
+            return store.read_flat(name, start, start + count).view(torch.uint8).reshape(
+                end_row - begin_row, cols)
+        return rows_of(name, begin, rows, cols, "codes")[order[begin_row:end_row]]
 
     def scales(begin_row: int, end_row: int):
-        start = scale_begin + begin_row * scale_cols
-        count = (end_row - begin_row) * scale_cols
-        return store.read_flat(scale_name, start, start + count).view(torch.uint8).reshape(
-            end_row - begin_row, scale_cols)
+        if order is None:
+            start = scale_begin + begin_row * scale_cols
+            count = (end_row - begin_row) * scale_cols
+            return store.read_flat(scale_name, start, start + count).view(torch.uint8).reshape(
+                end_row - begin_row, scale_cols)
+        return rows_of(scale_name, scale_begin, scale_rows, scale_cols, "scales")[
+            order[begin_row:end_row]]
 
     amax = float(store.read_flat(f"{prefix}.{weight}_amax").reshape(-1)[expert])
     denominator = float(store.read_flat(f"{prefix}.{weight}_outer_scale_denominator").reshape(-1)[0])

@@ -419,6 +419,27 @@ output 2.0e-3 and the post-convolution output 3.9e-3 — all at BF16 storage rou
 | 4 | vision + DSpark; GSM8K and 32K perplexity within noise of the reference |
 | 5 | serving parity: chat template, reasoning effort, tool calls, `/v1/messages` |
 
+## 10c. The gate/up row interleave (artifact bug, fixed)
+
+The checkpoint stores the fused gate/up expert matrix **row-interleaved**: stored row `s` holds
+logical row `s/2` for even `s` and `half + (s-1)/2` for odd `s`. Passing the stored order straight
+through produced an artifact whose expert `w13` matrices were a row permutation of the reference's,
+while the attention weights, the router and `w2` were all correct — so layer 0's MLP looked right
+in a fixture test that fed the reference's own dequantised experts, and would have been wrong the
+moment the artifact's experts were used.
+
+Found by comparing the decoded payload against the reference-dequantised matrix row by row:
+
+```
+stored row 0    -> logical row 0      maxdiff 2.2e-4
+stored row 1    -> logical row 1152   maxdiff 1.6e-4
+stored row 2    -> logical row 1      maxdiff 2.2e-4
+stored row 2303 -> logical row 2303   maxdiff 1.6e-4
+```
+
+`w2` is stored in logical order, so the mapping applies to `w13` only. The converter now remaps
+the rows for that tensor alone.
+
 ## 10b. NVFP4 storage, verified
 
 The NVFP4 container this repository reads (and this converter writes) is:
@@ -443,10 +464,21 @@ offset = (m_tile*(k/64) + tile)*512 + (inner&31)*16 + (inner>>5)*4 + lane
 "invalid NVFP4 weight" until `materialize` passed 1.0. That is fixed and unrelated to which route
 runs.
 
-There is no tuned NVFP4 route for 2304x2304 or 2304x1152, and the runtime-extent NVFP4 decode
-route was written and then withdrawn: it disagreed with the dequantised experts by 1e26, i.e. it
-was wrong, and a wrong kernel in a table that dispatches silently is worse than a missing one.
-The layout facts above are what the next attempt starts from.
+There is no tuned NVFP4 route for 2304x2304 or 2304x1152, so `launch_nvfp4_generic_gemv` serves
+them: one warp per output row, any extents, single token. Against the reference-dequantised
+experts of layer 0 it lands within 4e-3 (BF16 storage of a 2304-term sum):
+
+```
+expert 22 (slot 0)  max|err| 2.9e-3
+expert 24 (slot 1)  max|err| 4.0e-3
+expert 63 (slot 2)  max|err| 3.9e-3
+expert 93 (slot 3)  max|err| 3.0e-3
+```
+
+That check only passed after the row-interleave fix in 10c: the first version of this route read
+the artifact's experts in the order the converter had written them, which was a row permutation
+of the truth, and it disagreed by 1e26 rather than by a rounding error. The inflated error was
+the signal that the *data* was wrong, not the kernel's arithmetic.
 
 ## 10a. The shape table and the generic route
 

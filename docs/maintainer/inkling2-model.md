@@ -1,7 +1,8 @@
 # Inkling 2 Mini (`inkling2_loop`) — support spec
 
-Status: **stage 0 (specification)**. No kernel, converter output or artifact exists yet. This
-document is the contract the later stages are measured against; every claim below is either read
+Status: **stage 1 (artifact)**. A `.ninfer` artifact is built from the published checkpoint and
+verified against it; no C++ model module or kernel exists yet. This document is the contract the
+later stages are measured against; every claim below is either read
 from the checkpoint's own metadata (`config.json`, `model.safetensors.index.json`,
 `hf_quant_config.json`), from the vLLM day-0 write-up, or marked **unverified** where only the
 reference implementation can settle it.
@@ -135,9 +136,32 @@ file alone will silently drop every scale. `tools/convert/inkling2.py --check` c
 40 NVFP4 payloads, 8 MXFP8 payloads, 48 block scales, 80 metadata tensors, 1068 bf16. This is the first trap, and `tools/convert/inkling2.py
 --check` exists to catch it.
 
-On `sm_89` there are no FP4 tensor cores and no block-scaled FP8 MMA, so the same rule that governs
-the existing NVFP4 artifacts applies: **W4/A16** (4-bit weights read and dequantised in-kernel,
-bf16 activations) or a store-time requantisation. Storage decisions per card are in §8.
+The dequantisation contract is settled, and it was verified on the real shard, not inferred:
+
+```
+NVFP4  w = e2m1(low nibble = even column, high nibble = odd column)
+           * e4m3(scale word, one per 16 columns)
+           * amax[expert] / outer_scale_denominator      (denominator = 2688 = 448 x 6)
+MXFP8  w = e4m3(code) * 2**(scale_byte - 127)           (one scale per 32 columns)
+```
+
+The check that makes this trustworthy is scale-free: every expert matrix must come out at
+`rms = 1/sqrt(fan_in)`. Measured over all 24 layers, `w13` lands on `0.02083 = 1/sqrt(2304)` and
+`w2` on `0.02946 = 1/sqrt(1152)`, uniform to five decimals. A missing, doubled or 448-scaled outer
+factor cannot hit both numbers.
+
+`sm_89` has no FP4 tensor cores and no block-scaled FP8 MMA, so NVFP4 there is a **storage** format
+only: codes and scales are read at 4.5 bits and dequantised in-kernel against bf16 tensor cores —
+the same mechanism the Q4 groupwise path already uses. Ada does have FP8 MMA, so the four MXFP8
+layers can run on fp8 tensor cores once the per-32 `ue8m0` scale is folded in-kernel.
+
+**Pass-through needs no container change.** NInfer stores experts as separate logical parameters
+(`experts/{e}/...`), and each expert carries its own FP32 weight divisor, so
+`divisor = denominator / amax[e]` reproduces the stored numerics exactly. Round-tripping one expert
+through `tools/artifact/codecs/nvfp4.py` preserves the code, scale and divisor words bit-for-bit
+and matches the direct dequantisation to 3e-8 (FP32 multiply-versus-divide). Converting the same
+expert to Q4 groupwise instead measures cosine 0.9935 against the stored values — a second
+quantisation the pass-through avoids.
 
 ## 7. Tensor naming
 
@@ -150,11 +174,15 @@ Prefixes are `model.llm.*` (822 tensors) and `model.visual.*` (422). Layers are
 
 Weights at the two candidate store formats, using the measured 26.4 B parameters:
 
-| Store format | Bits/param | Weights | Fits 16 GB? | Fits 32 GB? |
-|---|---:|---:|---|---|
-| NVFP4 (as shipped, block 16 + fp8 outer) | 4.5 | 14.9 GB | no | yes |
-| Q4 groupwise, per-64 fp16 scales | 4.25 | 14.0 GB | no | yes |
-| Q3 groupwise (new recipe) | 3.25 | 10.7 GB | yes | yes |
+| Store format | Bits/param | Weights | Fits 16 GB? | Fits 32 GB? | Extra loss vs the checkpoint |
+|---|---:|---:|---|---|---|
+| NVFP4 pass-through (as shipped) | 4.5 | 14.9 GB | no | yes | **none** |
+| Q4 groupwise, per-64 fp16 scales | 4.25 | 14.0 GB | no | yes | cosine 0.9935 per matrix |
+| Q3 groupwise (new recipe) | 3.25 | 10.7 GB | yes | yes | not yet measured |
+
+Decision: the 4080 SUPER carries the checkpoint's NVFP4 payload unchanged (zero quantisation loss,
+2x the scale traffic versus Q4); the 5060 Ti needs Q3 and that is the only deliberately lossy step.
+Q4 stays available as a middle option to measure, not as the default.
 
 KV per token, counting only the four global layers and their visits (5 once, 11 ×3, 17 ×3, 23
 once = 8 visit-caches × 8 KV heads × 128 dim × 2 tensors):
@@ -171,6 +199,31 @@ per-token term.
 Practical consequence: **the 1M context in the model card is not reachable on either card.** 256K
 on the 4080 SUPER at `rk4v4` is the realistic target; the 5060 Ti gets ~32K and only with Q3
 experts.
+
+## 8a. Stage-1 artifact (built)
+
+`tools/convert/inkling2.py --emit` produced `inkling2-mini.ninfer`: **19.68 GB**, **7212 bound
+parameters**, 7215 objects, 1760 s on one H200-class card with 192 host cores.
+
+| Format | Parameters | What it holds |
+|---|---:|---|
+| `nvfp4` | 5120 | experts of layers 0-19, E2M1 codes + E4M3 block scales + per-expert divisor, untouched |
+| `q8_g32_fp16` | 1024 | experts of layers 20-23, requantised from MXFP8 at the same 8-bit, per-32 granularity |
+| `bf16` | 994 | attention, controllers, `attn_res`, sconv, embeddings, vision tower, norms |
+| `fp32` | 74 | the controllers' arithmetic and `attn_res` queries, as stored |
+
+Read-back against the source, not against the converter's own state:
+
+| Parameter | Check |
+|---|---|
+| `text/layers/0/mlp/experts/0/w13` (nvfp4) | cos 0.99986, max abs diff 7.5e-09 — the FP32 multiply/divide rounding only |
+| `text/layers/20/mlp/experts/0/w13` (q8) | cos 1.00000, median relative error 0.0078 |
+| `text/embed/weight` (bf16) | bit-exact |
+
+The artifact is a **slot bag**, not yet a model: every stored tensor is one logical parameter named
+after its source path (`text/layers/6/attn/wq_du.weight`, `text/layers/6/mlp/experts/7/w13`). The
+C++ model module of stage 2 binds those slots to the mathematics; nothing here presumes how the
+u/d factorisation composes.
 
 ## 9. Drafter and vision (stage 4)
 
@@ -189,7 +242,7 @@ module that may reuse the ops but not the wiring.
 | Stage | Gate |
 |---|---|
 | 0 | this document; `tools/convert/inkling2.py --check` passes on the real checkpoint metadata |
-| 1 | converter round-trip: dequantised tensors match HF dequant within cos ≥ 0.9999; artifact loads |
+| 1 | **met**: artifact written, NVFP4 slots read back at cos 0.99986 (9e-3 relative to FP32 rounding), bf16 slots bit-exact |
 | 2 | text-only, greedy, 8K: all 48 visit hidden states within the tolerance the vLLM write-up measured (≈ FlashAttention-vs-PyTorch divergence), short prompts token-identical to the reference |
 | 3 | 48 KV + conv-state caches, 128K context on the 4080 SUPER, prefix reuse |
 | 4 | vision + DSpark; GSM8K and 32K perplexity within noise of the reference |

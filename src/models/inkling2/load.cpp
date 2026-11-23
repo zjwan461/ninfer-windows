@@ -1,6 +1,5 @@
 #include "models/inkling2/load.h"
 
-#include "artifact/binder.h"
 #include "artifact/schema.h"
 
 #include <set>
@@ -179,13 +178,6 @@ QType weight_type(std::string_view format) {
     if (format == kBf16) { return QType::BF16; }
     if (format == kFp32) { return QType::FP32; }
     throw ArtifactError("Inkling2: unsupported stored format " + std::string(format));
-}
-
-void declare_parameters(artifact::Binder& binder, const Config& config) {
-    for (const auto& slot : expected_slots(config)) {
-        (void)binder.parameter(slot.name, slot.shape, artifact::Residency::Device,
-                               weight_type(slot.format));
-    }
 }
 
 void validate_parameters(const Directory& directory, const Config& config) {

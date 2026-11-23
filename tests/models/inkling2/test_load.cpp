@@ -8,6 +8,7 @@
 #include "artifact/fixture.h"
 #include "artifact/reader.h"
 #include "models/inkling2/load.h"
+#include "models/inkling2/parameters.h"
 
 #include <cuda_runtime.h>
 
@@ -62,6 +63,28 @@ int main(int argc, char** argv) {
         require(by_format["q8_g32_fp16"] == 1024, "q8 expert count differs");
         require(by_format["bf16"] == 572, "bf16 slot count differs");
         require(by_format["fp32"] == 74, "fp32 slot count differs");
+
+        const auto index = models::inkling2::build_index(bound, config);
+        std::size_t assigned = 0;
+        for (const auto& layer : index.layers) {
+            for (auto slot : layer.role) { if (slot >= 0) { ++assigned; } }
+            for (auto slot : layer.expert_w13) { if (slot >= 0) { ++assigned; } }
+            for (auto slot : layer.expert_w2) { if (slot >= 0) { ++assigned; } }
+            for (auto slot : layer.controller_down) { if (slot >= 0) { ++assigned; } }
+            for (auto slot : layer.controller_forget) { if (slot >= 0) { ++assigned; } }
+            for (auto slot : layer.controller_gain) { if (slot >= 0) { ++assigned; } }
+        }
+        for (auto slot : index.attn_queries) { if (slot >= 0) { ++assigned; } }
+        for (auto slot : index.mlp_queries) { if (slot >= 0) { ++assigned; } }
+        require(assigned + 7 == bound.size(), "every slot must take exactly one role");
+        require(index.layers[0].has(models::inkling2::Role::AttnNorm),
+                "a sliding-window layer normalises the attention input once");
+        require(!index.layers[5].has(models::inkling2::Role::AttnNorm),
+                "a global layer has no attn_norm");
+        require(index.layers[5].has(models::inkling2::Role::QInputNorm),
+                "a global layer carries q/k/v input norms");
+        require(index.layers[5].controller_gain[3] < 0,
+                "controllers exist only inside the loop core");
 
         require(models::inkling2::weight_type("nvfp4") == QType::NVFP4, "nvfp4 maps to NVFP4");
         require(models::inkling2::weight_type("q8_g32_fp16") == QType::Q8_G32_FP16,

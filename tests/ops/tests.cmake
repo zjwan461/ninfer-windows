@@ -25,7 +25,8 @@ set(ninfer_op_tests
   scatter_bf16_batch
   target_logprobs
   position
-  relbias_attention)
+  relbias_attention
+  scaled_l2_clip)
 foreach(op IN LISTS ninfer_op_tests)
   ninfer_add_op_test(ninfer_${op}_test
     SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_${op}.cpp"

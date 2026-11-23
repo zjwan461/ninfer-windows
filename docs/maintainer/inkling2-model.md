@@ -125,6 +125,12 @@ out = (out * sigmoid(Wgate x)) @ Wo                            # gate computed i
 is the `[16, 1024]` bank of bias-versus-distance profiles, and the two clip scales are the learned
 per-head multipliers applied before the clip.
 
+`ninfer::ops::scaled_l2_clip` implements the projection-side normalisation for both the query
+path (head_dim 128, threshold 22.627) and the relative-state path (head_dim 16, threshold 8), with
+the learned per-head scale applied before the clip and the log-scaled `tau` applied after it on
+global layers. Its oracle errors sit exactly on the BF16 store quantum (2^-7 at magnitude one), so
+the arithmetic is FP32-clean.
+
 The decode half of this is implemented as `ninfer::ops::relbias_attention`: one warp per query
 head, online softmax over the visible cache, the sink entering the normaliser as one extra logit
 with no value, and the gate folded into the output. It matches an FP64 oracle to 1.6e-3 on full,

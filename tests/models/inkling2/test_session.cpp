@@ -5,6 +5,7 @@
 #include "models/inkling2/config.h"
 #include "models/inkling2/execution/session.h"
 #include "models/inkling2/materialize.h"
+#include "ninfer/ops/argmax.h"
 
 #include <cstdlib>
 #include <chrono>
@@ -41,18 +42,35 @@ int main(int argc, char** argv) {
         std::filesystem::path artifact_path;
         std::filesystem::path oracle;
         std::uint32_t token = 1234;
+        std::vector<std::uint32_t> prompt_ids;
         int bench_steps = 0;
+        int generate_steps = 0;
         std::filesystem::path reference_stages;
         for (int i = 1; i < argc; ++i) {
             const std::string arg(argv[i]);
             if (arg == "--artifact" && i + 1 < argc) { artifact_path = argv[++i]; }
             else if (arg == "--oracle" && i + 1 < argc) { oracle = argv[++i]; }
             else if (arg == "--token" && i + 1 < argc) { token = static_cast<std::uint32_t>(std::stoul(argv[++i])); }
+            else if (arg == "--prompt-ids" && i + 1 < argc) {
+                std::string list(argv[++i]);
+                std::size_t start = 0;
+                while (start <= list.size()) {
+                    const auto comma = list.find(',', start);
+                    const auto piece = list.substr(start, comma - start);
+                    if (!piece.empty()) {
+                        prompt_ids.push_back(static_cast<std::uint32_t>(std::stoul(piece)));
+                    }
+                    if (comma == std::string::npos) { break; }
+                    start = comma + 1;
+                }
+            }
             else if (arg == "--stages" && i + 1 < argc) { reference_stages = argv[++i]; }
             else if (arg == "--bench" && i + 1 < argc) { bench_steps = std::stoi(argv[++i]); }
+            else if (arg == "--generate" && i + 1 < argc) { generate_steps = std::stoi(argv[++i]); }
             else { throw std::invalid_argument("unknown argument " + arg); }
         }
-        if (artifact_path.empty() || (oracle.empty() && bench_steps == 0)) {
+        if (artifact_path.empty() ||
+            (oracle.empty() && bench_steps == 0 && generate_steps == 0)) {
             std::cout << "SKIP: supply --artifact and --oracle\n";
             return 77;
         }
@@ -63,7 +81,7 @@ int main(int argc, char** argv) {
         auto weights = models::inkling2::materialize_text(reader, config, device);
 
         models::inkling2::execution::SessionOptions options;
-        options.max_context = bench_steps > 0 ? 4096 : 8;
+        options.max_context = (bench_steps > 0 || generate_steps > 0) ? 4096 : 8;
         models::inkling2::execution::Session session(weights, config, device, options);
         session.reset();
         // Compare the first visit stage by stage against the model's own dump: a name mismatch
@@ -84,6 +102,48 @@ int main(int argc, char** argv) {
             std::cout << "session bench: " << bench_steps << " steps in " << seconds << " s -> "
                       << (double(bench_steps) / seconds) << " tok/s (48 visits, context "
                       << session.max_context() << ")\n";
+            return 0;
+        }
+        if (generate_steps > 0) {
+            // Greedy generation: the point is that the chain produces a sequence, not that the
+            // sampling policy is interesting. Prompt tokens come from the command line.
+            session.reset();
+            if (prompt_ids.empty()) { prompt_ids.push_back(token); }
+            // Every prompt token but the last is fed without asking for a token back; the last one
+            // is fed inside the loop, so the first generated token is the continuation of the
+            // whole prompt rather than of a repeated token.
+            for (std::size_t i = 0; i + 1 < prompt_ids.size(); ++i) {
+                session.step(prompt_ids[i], nullptr);
+            }
+            std::uint32_t pending = prompt_ids.back();
+            // Allocated once: a cudaMalloc per token synchronises the device, which is exactly the
+            // trap that made an earlier benchmark report a third of the real rate.
+            void* device_arg = nullptr;
+            cudaMalloc(&device_arg, sizeof(std::int32_t));
+            Tensor argmax_out(device_arg, DType::I32, {1});
+            const auto argmax_of = [&](std::uint32_t input) {
+                const auto logits_now = session.step(input, nullptr);
+                ops::argmax(logits_now, argmax_out, logits_now.ne[0], nullptr);
+                std::int32_t best = 0;
+                cudaMemcpy(&best, device_arg, sizeof(best), cudaMemcpyDeviceToHost);
+                return static_cast<std::uint32_t>(best);
+            };
+            const auto begin = std::chrono::steady_clock::now();
+            std::vector<std::uint32_t> generated;
+            for (int i = 0; i < generate_steps; ++i) {
+                pending = argmax_of(pending);
+                generated.push_back(pending);
+            }
+            cudaDeviceSynchronize();
+            const auto end = std::chrono::steady_clock::now();
+            const double seconds = std::chrono::duration<double>(end - begin).count();
+            std::cout << "prompt:";
+            for (auto id : prompt_ids) { std::cout << " " << id; }
+            std::cout << "\ngenerated:";
+            for (auto id : generated) { std::cout << " " << id; }
+            std::cout << "\n" << generate_steps << " tokens in " << seconds << " s -> "
+                      << (double(generate_steps) / seconds) << " tok/s\n";
+            cudaFree(device_arg);
             return 0;
         }
         int visits_seen = 0;

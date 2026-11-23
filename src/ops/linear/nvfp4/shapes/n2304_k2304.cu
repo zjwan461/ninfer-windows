@@ -2,6 +2,12 @@
 // expanded twice) and the down projection. The decode route is the same tuned GEMV schedule the
 // other shapes use; only the geometry differs, and 2304 needs a 256-value phase, so this shape
 // reads 8 values per lane instead of the 16 the 5120-wide shapes use.
+//
+// The schedule is inherited from the 5120-wide shapes rather than tuned for this geometry. Two
+// alternatives were tried and measured nothing: three runs of the *same* binary on the shared slice
+// used here gave 15.2, 17.1 and 18.2 tok/s, so its run-to-run spread is about twenty percent and
+// the 14.7 - 16.4 the alternatives reported is inside it. Tuning this belongs on the target cards,
+// where the noise floor is a dedicated GPU.
 #include "ops/linear/nvfp4/nvfp4_launch.cuh"
 #include "ops/linear/nvfp4/nvfp4_shapes.h"
 

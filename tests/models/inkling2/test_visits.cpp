@@ -950,14 +950,25 @@ int main(int argc, char** argv) {
                 for (std::size_t i = 0; i < values.size(); ++i) { packed[i] = to_bf16(values[i]); }
                 cudaMemcpy(dst, packed.data(), packed.size() * 2, cudaMemcpyHostToDevice);
             };
-            load_into("visit_in_0.bin", runner.s.stack);
-            load_into("visit_in_30.bin", static_cast<char*>(runner.s.stack) + kHidden * 2);
-            load_into("visit_in_36.bin", static_cast<char*>(runner.s.stack) + 2 * kHidden * 2);
-            stack_length = 3;  // the pass-2 boundary entries
-            if (seed_visit > 42) {
-                // Layer 18 is a boundary too, so every later coda visit sees its entry.
-                load_into("visit_in_42.bin", static_cast<char*>(runner.s.stack) + 3 * kHidden * 2);
-                stack_length = 4;
+            if (seed_visit < 18) {
+                // A first-pass core visit sees the prelude's entry, plus the one layer 6 pushed
+                // once the pass has reached it.
+                load_into("visit_in_0.bin", runner.s.stack);
+                stack_length = 1;
+                if (seed_visit > 6) {
+                    load_into("visit_in_6.bin", static_cast<char*>(runner.s.stack) + kHidden * 2);
+                    stack_length = 2;
+                }
+            } else {
+                load_into("visit_in_0.bin", runner.s.stack);
+                load_into("visit_in_30.bin", static_cast<char*>(runner.s.stack) + kHidden * 2);
+                load_into("visit_in_36.bin", static_cast<char*>(runner.s.stack) + 2 * kHidden * 2);
+                stack_length = 3;  // the pass-2 boundary entries
+                if (seed_visit > 42) {
+                    // Layer 18 is a boundary too, so every later coda visit sees its entry.
+                    load_into("visit_in_42.bin", static_cast<char*>(runner.s.stack) + 3 * kHidden * 2);
+                    stack_length = 4;
+                }
             }
             load_into("visit_in_" + std::to_string(seed_visit) + ".bin", runner.s.h);
             cudaMemcpy(pre_loop_h, runner.s.h, kHidden * 2, cudaMemcpyDeviceToDevice);

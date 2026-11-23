@@ -5,6 +5,7 @@ the 52 GB reference model nor a GPU. Writes the same stage fixtures as ref_layer
 
     python tests/inkling2/ref_visit.py 6 1     # layer 6, second pass
 """
+import os
 import sys
 import numpy as np
 from safetensors import safe_open
@@ -76,7 +77,11 @@ def visit_of(target_layer, target_pass):
 
 h_in = visit_in(visit_of(layer, loop_pass))
 if in_core:
-    stack = [visit_in(0)] if loop_pass == 0 else [visit_in(0)]
+    # Inside the core the stack restarts from the prelude's entry and gains one entry at layer 6
+    # of the same pass, so a layer after it reads two block entries.
+    stack = [visit_in(0)]
+    if layer > 6:
+        stack.append(visit_in(visit_of(6, loop_pass)))
     prev_h = visit_in(visit_of(17, loop_pass - 1) + 1) if loop_pass > 0 else None
     prev_block = visit_in(12) if loop_pass > 0 else None
 else:
@@ -94,9 +99,12 @@ with safe_open(SHARD, framework='pt') as f:
     nq = 1 if sliding else 3
     aq = f.get_tensor(f'model.llm.attn_res.attn_queries.{layer - 1}').float().numpy().reshape(-1, 2304)[:nq]
     streams = read_block(aq, np.stack(stack + [h_in]))
-    attn_in = streams[0]
-    k_base = streams[1] if nq == 3 else streams[0]
-    v_base = streams[2] if nq == 3 else streams[0]
+    # The three queries of a full layer are read as [query, key, value]; PERM exists to check that
+    # order against the model's own output rather than against another reading of the same source.
+    perm = [int(c) for c in os.environ.get("PERM", "012")]
+    attn_in = streams[perm[0]]
+    k_base = streams[perm[1]] if nq == 3 else streams[perm[0]]
+    v_base = streams[perm[2]] if nq == 3 else streams[perm[0]]
 
     attn_in_pre = attn_in.copy()
 
@@ -202,6 +210,14 @@ with safe_open(SHARD, framework='pt') as f:
     s = 1.0 / (1.0 + np.exp(-(g('mlp.gate.weight').astype(np.float64) @ x)))
     sel = np.argsort(-(s + g('mlp.gate.bias').astype(np.float64)))[:8]
     w = s[sel] / s[sel].sum() * 8.0
+    # The model's own selection, when the oracle recorded it: this model has near-ties, so the
+    # comparison has to use the same experts rather than the ones this script would pick.
+    route_file = f'/tmp/oracle1/route_{visit_of(layer, loop_pass)}.txt'
+    if os.path.exists(route_file):
+        recorded = [int(v) for v in open(route_file).read().split('\n')[0].split()]
+        if len(recorded) == 8:
+            sel = np.array(recorded)
+            w = s[sel] / s[sel].sum() * 8.0
     print('experts', sel.tolist())
 
     order = np.where(np.arange(2304) < 1152, np.arange(2304) * 2, (np.arange(2304) - 1152) * 2 + 1)
@@ -269,4 +285,17 @@ with safe_open(SHARD, framework='pt') as f:
     write('mlp_pre', acc)
     write('mlp', mlp_out)
     write('out', out)
+    target = f'/tmp/oracle1/visit_out_{visit_of(layer, loop_pass)}.bin'
+    if os.path.exists(target):
+        expected = np.fromfile(target, dtype=np.float32)
+        print('out vs model max|err|', round(float(np.abs(out.reshape(-1) - expected).max()), 4))
+        implied = expected.astype(np.float64) - residual.reshape(-1)
+        scale = np.linalg.norm(implied) / np.linalg.norm(mlp_out)
+        cosine = float(implied @ mlp_out / np.linalg.norm(implied) / np.linalg.norm(mlp_out))
+        print('model - residual vs mlp: scale', round(float(scale), 4), 'cos', round(cosine, 4))
+        attn_implied = expected.astype(np.float64) - h_in.reshape(-1) - mlp_out
+        print('model - h - mlp vs attn: scale',
+              round(float(np.linalg.norm(attn_implied) / np.linalg.norm(conv_out)), 4),
+              'cos', round(float(attn_implied @ conv_out / np.linalg.norm(attn_implied) /
+                                 np.linalg.norm(conv_out)), 4))
     print('wrote layer', layer, 'pass', loop_pass, 'stages')

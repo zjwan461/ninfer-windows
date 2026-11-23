@@ -27,6 +27,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <algorithm>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -75,6 +76,12 @@ std::vector<float> read_f32(const std::filesystem::path& path) {
     std::vector<float> data(static_cast<std::size_t>(bytes) / sizeof(float));
     stream.read(reinterpret_cast<char*>(data.data()), bytes);
     return data;
+}
+
+std::string read_text(const std::filesystem::path& path) {
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream) { throw std::runtime_error("cannot open " + path.string()); }
+    return std::string(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
 }
 
 void* alloc(std::size_t count, std::size_t element) {
@@ -151,7 +158,8 @@ struct Runner {
     cudaStream_t stream = nullptr;
     double worst_visit = 0.0;
     void* gate_f32 = nullptr;
-    std::filesystem::path stage_fixture;  // layer 0 only: per-stage reference buffers
+    std::filesystem::path route_dir;      // optional: reference routing per layer
+    std::filesystem::path stage_fixture;  // per-stage reference buffers
     bool stage = false;
     int stage_layer = 0;
     void stage_compare(void* device, const char* suffix, int width = kHidden) {
@@ -520,10 +528,67 @@ struct Runner {
         Tensor router_weights(s.router_weights, DType::FP32, {kTopK, 1});
         moe_router(vec(s.mlp_in, kHidden), gate_matrix, gate_bias_vec, kTopK, 8.0F, router_out,
                    router_weights, stream);
+        // Does the routing have a near-tie? A hidden one would flip an expert under BF16 noise
+        // and change the MoE output far more than rounding.
+        if (stage) {
+            std::vector<std::uint16_t> xh(kHidden);
+            cudaMemcpy(xh.data(), s.mlp_in, kHidden * 2, cudaMemcpyDeviceToHost);
+            const std::vector<float>* gate_host = nullptr;
+            std::vector<float> gate_copy;
+            if (gate_f32 != nullptr) {
+                gate_copy.resize(std::size_t(kExperts) * kHidden);
+                cudaMemcpy(gate_copy.data(), gate_f32, gate_copy.size() * 4,
+                           cudaMemcpyDeviceToHost);
+                gate_host = &gate_copy;
+            }
+            if (gate_host != nullptr) {
+                std::vector<double> scores(kExperts);
+                // The selection bias is FP32 in the checkpoint, unlike the BF16 gate matrix.
+                std::vector<float> bias_host(kExperts);
+                cudaMemcpy(bias_host.data(), dense_tensor(weights, layer[Role::MlpGateBias]).data,
+                           kExperts * 4, cudaMemcpyDeviceToHost);
+                for (int e = 0; e < kExperts; ++e) {
+                    double dot = 0.0;
+                    for (int i = 0; i < kHidden; ++i) {
+                        dot += double((*gate_host)[std::size_t(e) * kHidden + i]) *
+                               double(from_bf16(xh[std::size_t(i)]));
+                    }
+                    scores[std::size_t(e)] = 1.0 / (1.0 + std::exp(-dot)) + double(bias_host[std::size_t(e)]);
+                }
+                std::vector<double> sorted = scores;
+                std::sort(sorted.begin(), sorted.end(), std::greater<double>());
+                std::cout << "      router margin (8th-9th) " << (sorted[7] - sorted[8])
+                          << " top " << sorted[0] << "\n";
+            }
+        }
         std::vector<std::int32_t> indices(kTopK);
         std::vector<float> routing(kTopK);
         cudaMemcpy(indices.data(), s.indices, kTopK * sizeof(std::int32_t), cudaMemcpyDeviceToHost);
         cudaMemcpy(routing.data(), s.router_weights, kTopK * sizeof(float), cudaMemcpyDeviceToHost);
+        if (!route_dir.empty()) {
+            // The reference's own selection: routing is a discrete function and this model has
+            // near-ties, so the MoE arithmetic has to be checked on a fixed selection.
+            const auto path = route_dir / ("ref_route_" + std::to_string(layer_index) + ".json");
+            if (std::filesystem::exists(path)) {
+                const auto json = artifact::parse_json(read_text(path), "route");
+                for (int j = 0; j < kTopK; ++j) {
+                    indices[static_cast<std::size_t>(j)] = json.at("indices")[j].get<std::int32_t>();
+                    routing[static_cast<std::size_t>(j)] =
+                        static_cast<float>(json.at("weights")[j].get<double>());
+                }
+            }
+        }
+        if (stage) {
+            std::cout << "      my experts:";
+            for (int j = 0; j < kTopK; ++j) { std::cout << " " << indices[static_cast<std::size_t>(j)]; }
+            std::cout << "\n      my weights:";
+            for (int j = 0; j < kTopK; ++j) { std::cout << " " << routing[static_cast<std::size_t>(j)]; }
+            std::cout << "\n";
+            std::vector<std::uint16_t> a(3);
+            cudaMemcpy(a.data(), s.mlp_in, 3 * 2, cudaMemcpyDeviceToHost);
+            std::cout << "      my mlp_in[0:3] " << from_bf16(a[0]) << " " << from_bf16(a[1]) << " "
+                      << from_bf16(a[2]) << "\n";
+        }
         std::vector<double> accumulator(kHidden, 0.0);
         for (int j = 0; j < kTopK; ++j) {
             const auto expert = static_cast<std::size_t>(indices[static_cast<std::size_t>(j)]);
@@ -569,6 +634,12 @@ struct Runner {
             causal_dconv_residual(vec(s.down, kHidden), conv2d, state_in, state_out,
                                   vec(s.mlp_conv, kHidden), stream);
         }
+        if (stage) {
+            std::vector<std::uint16_t> a(3);
+            cudaMemcpy(a.data(), s.down, 3 * 2, cudaMemcpyDeviceToHost);
+            std::cout << "      my moe[0:3] " << from_bf16(a[0]) << " " << from_bf16(a[1]) << " "
+                      << from_bf16(a[2]) << "\n";
+        }
         stage_compare(s.mlp_conv, "mlp.bin");
         accumulate(s.gated_x, s.mlp_conv);
         cudaMemcpy(s.h, s.gated_x, kHidden * 2, cudaMemcpyDeviceToDevice);
@@ -613,11 +684,13 @@ int main(int argc, char** argv) {
         std::filesystem::path artifact_path;
         std::filesystem::path oracle;
         std::filesystem::path stages;
+        std::filesystem::path routes;
         for (int i = 1; i < argc; ++i) {
             const std::string arg(argv[i]);
             if (arg == "--artifact" && i + 1 < argc) { artifact_path = argv[++i]; }
             else if (arg == "--oracle" && i + 1 < argc) { oracle = argv[++i]; }
             else if (arg == "--stages" && i + 1 < argc) { stages = argv[++i]; }
+            else if (arg == "--routes" && i + 1 < argc) { routes = argv[++i]; }
             else { throw std::invalid_argument("unknown argument " + arg); }
         }
         if (artifact_path.empty() || oracle.empty()) {
@@ -633,6 +706,7 @@ int main(int argc, char** argv) {
 
         Runner runner{weights, config};
         runner.init();
+        if (!routes.empty()) { runner.route_dir = routes; }
         if (!stages.empty()) {
             runner.stage_fixture = stages;
             runner.stage = true;

@@ -56,6 +56,13 @@ def main() -> None:
         return hook
 
     inputs_seen: list[np.ndarray] = []
+    routing: list[tuple[np.ndarray, np.ndarray]] = []
+
+    def router_hook(module, args_, output):
+        # (logits, weights, indices): the selection is a discrete function and this model has
+        # near-ties, so the parity test needs to know when the routing itself differed.
+        routing.append((output[2].detach().cpu().numpy()[0].astype(np.int64),
+                        output[1].detach().float().cpu().numpy()[0].astype(np.float32)))
 
     def input_hook(module, args_):
         inputs_seen.append(args_[0].detach().float().cpu().numpy())
@@ -64,6 +71,7 @@ def main() -> None:
                for i, layer in enumerate(find_text_stack(model))]
     stack = find_text_stack(model)
     handles += [layer.register_forward_pre_hook(input_hook) for layer in stack]
+    handles += [layer.mlp.gate.register_forward_hook(router_hook) for layer in stack]
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     if args.token_id is None:
@@ -96,11 +104,18 @@ def main() -> None:
                 args.raw / f"visit_in_{index}.bin")
         print("raw buffers in", args.raw)
 
+    if args.raw is not None:
+        for index, (indices, weights) in enumerate(routing):
+            (args.raw / f"route_{index}.txt").write_text(
+                " ".join(str(int(i)) for i in indices) + "\n" +
+                " ".join(f"{w:.8g}" for w in weights) + "\n")
     np.savez(args.out,
              hidden=np.stack([v[1][0] for v in visits]),
              hidden_in=np.stack([np.reshape(i[0], -1) for i in inputs_seen]),
              layers=np.array([v[0] for v in visits]),
-             logits=logits, ids=ids.cpu().numpy())
+             logits=logits, ids=ids.cpu().numpy(),
+             route_indices=np.stack([r[0] for r in routing]),
+             route_weights=np.stack([r[1] for r in routing]))
     print("saved", args.out)
 
 

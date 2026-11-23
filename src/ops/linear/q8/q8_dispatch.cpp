@@ -50,4 +50,11 @@ void q8_dispatch(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy pol
     select_q8_launch(w.n, w.k, x.ne[1], policy)(x, w, out, stream);
 }
 
+bool has_q8_shape(std::int32_t n, std::int32_t k) {
+    for (const auto& entry : kShapes) {
+        if (entry.n == n && entry.k == k) { return true; }
+    }
+    return false;
+}
+
 } // namespace ninfer::ops::detail

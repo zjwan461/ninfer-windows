@@ -10,6 +10,7 @@
 #include "ops/linear/q5/q5_dispatch.h"
 #include "ops/linear/q6/q6_dispatch.h"
 #include "ops/linear/q8/q8_dispatch.h"
+#include "ops/linear/q8/q8_launch.h"
 #include "ops/linear/t5/t5_project.h"
 
 #include <cstdint>
@@ -90,6 +91,12 @@ void dispatch_linear(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy
         detail::q6_dispatch(x, w, out, policy, stream);
         return;
     case QType::Q8_G32_FP16:
+        // A shape outside the tuned table still has to run; the generic decode route covers any
+        // extents for a single token.
+        if (x.ne[1] == 1 && !detail::has_q8_shape(w.n, w.k)) {
+            detail::launch_q8_generic_gemv(x, w, out, stream);
+            return;
+        }
         detail::q8_dispatch(x, w, out, policy, stream);
         return;
     case QType::BF16:

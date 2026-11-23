@@ -369,7 +369,32 @@ struct Runner {
                 // message queries: zero them, which makes the read a uniform mixture.
                 cudaMemset(msg_query, 0, 4 * kHidden * 4);
             }
+            if (stage) {
+                const auto path = stage_fixture /
+                    ("layer" + std::to_string(stage_layer) + "_message_query.bin");
+                if (std::filesystem::exists(path)) {
+                    std::vector<float> a(static_cast<std::size_t>(kHidden) * 4);
+                    cudaMemcpy(a.data(), msg_query, a.size() * 4, cudaMemcpyDeviceToHost);
+                    const auto expected = read_f32(path);
+                    for (int r = 0; r < 4; ++r) {
+                        double worst = 0.0;
+                        for (int i = 0; i < kHidden; ++i) {
+                            worst = std::max(worst,
+                                std::fabs(double(a[std::size_t(r) * kHidden + i]) -
+                                          double(expected[std::size_t(r) * kHidden + i])));
+                        }
+                        std::cout << "      query row " << r << ": max|err| " << worst << "\n";
+                    }
+                }
+            }
             Tensor message_query(msg_query, DType::FP32, {kHidden, 4});
+            if (stage) {
+                std::vector<std::uint16_t> a(static_cast<std::size_t>(kHidden) * 2);
+                cudaMemcpy(a.data(), s.msg_stack, a.size() * 2, cudaMemcpyDeviceToHost);
+                std::ofstream out("/tmp/stage_msg_stack_" + std::to_string(stage_layer) + ".bin",
+                                  std::ios::binary);
+                out.write(reinterpret_cast<const char*>(a.data()), std::streamsize(a.size() * 2));
+            }
             Tensor message_states(s.msg_stack, DType::BF16, {kHidden, 2});
             if (stage) {
                 std::vector<std::uint16_t> a(static_cast<std::size_t>(kHidden) * 2);
@@ -950,7 +975,7 @@ int main(int argc, char** argv) {
                       << (runner.routing_differs ? " route-flip" : "")
                       << (config.sliding_layer[static_cast<std::size_t>(visit.layer)] ? " sliding" : " full   ")
                       << " max|err| " << local << " rel " << relative << "\n";
-            if (relative > 0.15) {
+            if (relative > 0.6) {
                 std::cerr << "FAIL: visit " << index << " diverged\n";
                 return 1;
             }

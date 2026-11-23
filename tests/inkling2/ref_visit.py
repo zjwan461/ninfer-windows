@@ -101,6 +101,8 @@ with safe_open(SHARD, framework='pt') as f:
             return keep * x + add * m
         np.ascontiguousarray(msgs.reshape(-1), dtype=np.float32).tofile(
             f'/tmp/stages/layer{layer}_message.bin')
+        np.ascontiguousarray(mq.reshape(-1), dtype=np.float32).tofile(
+            f'/tmp/stages/layer{layer}_message_query.bin')
         attn_in = gate(attn_in, msgs[0], 'q')
         k_base = gate(k_base, msgs[1], 'k')
         v_base = gate(v_base, msgs[2], 'v')

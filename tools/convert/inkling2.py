@@ -359,7 +359,16 @@ def expert_matrix(store, layer: int, weight: str, expert: int):
     if scales.dtype != torch.uint8:  # NVFP4 block scales are stored as E4M3 bytes
         scales = scales.view(torch.uint8)
     if layer in MXFP8_LAYERS:
-        return dequantize_mxfp8(packed.view(torch.uint8), scales)
+        values = dequantize_mxfp8(packed.view(torch.uint8), scales)
+        # The fused gate/up matrix is stored gate/up interleaved in every quantisation: stored row
+        # s holds logical row s/2 for even s and half + (s-1)/2 for odd s. The pass-through path
+        # applies this when it reads rows; the values path has to apply it here.
+        if weight == "w13_weight":
+            half = rows // 2
+            index = torch.arange(rows)
+            order = torch.where(index < half, index * 2, (index - half) * 2 + 1)
+            values = values[order.to(values.device)]
+        return values
 
     amax = store.read_flat(f"{prefix}.{weight}_amax").reshape(-1)[expert]
     denominator = store.read_flat(f"{prefix}.{weight}_outer_scale_denominator").reshape(-1)[0]

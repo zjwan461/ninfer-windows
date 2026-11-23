@@ -33,6 +33,10 @@ set(ninfer_op_tests
   softcapped_swiglu
   moe_router
   message_merge)
+ninfer_add_op_test(ninfer_bf16_generic_linear_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_bf16_generic_linear.cpp"
+  LIBRARIES ninfer_ops)
+
 foreach(op IN LISTS ninfer_op_tests)
   ninfer_add_op_test(ninfer_${op}_test
     SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_${op}.cpp"

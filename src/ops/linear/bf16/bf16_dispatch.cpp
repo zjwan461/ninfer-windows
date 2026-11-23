@@ -22,7 +22,9 @@ Bf16Launch select_bf16_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t
     for (const auto& entry : kShapes) {
         if (entry.n == n && entry.k == k) return entry.select(t);
     }
-    throw std::invalid_argument("bf16 linear: unsupported shape");
+    // A model whose widths are not tuned yet still has to run: fall back to the runtime-extent
+    // kernel instead of refusing the shape. Tuned routes replace it as they are measured.
+    return launch_bf16_generic;
 }
 
 Bf16Launch select_bf16_launch(std::int32_t n, std::int32_t k, std::int32_t t, LinearPolicy policy) {

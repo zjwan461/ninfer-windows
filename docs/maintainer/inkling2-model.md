@@ -351,6 +351,18 @@ visit order the reference implementation actually produced.
 | 4 | vision + DSpark; GSM8K and 32K perplexity within noise of the reference |
 | 5 | serving parity: chat template, reasoning effort, tool calls, `/v1/messages` |
 
+## 10a. The shape table and the generic route
+
+Every existing linear route is templated on a compile-time geometry and covers exactly one
+`(n, k)`: bf16 has three, q4 has twelve, and a shape outside the table throws. Inkling's widths
+(3072x2304, 1024x2304, 2304x3072, 2304x1152, 384x2304, 2304x2304) are in none of them.
+
+`launch_bf16_generic` is the runtime-extent fallback: one output element per thread, the activation
+tile staged in shared memory. It is several times slower than a tuned route and exists so a model
+whose shapes have not earned a kernel can still be checked for correctness. `bf16_dispatch` uses it
+when the table misses, so the layer can be assembled and compared against the oracle before any
+shape tuning starts.
+
 ## 11. Where the code goes
 
 Additive only; the shared files are `src/models/registry.cpp`, `src/models/CMakeLists.txt`,

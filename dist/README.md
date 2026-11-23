@@ -9,11 +9,11 @@ release-asset cap. Build them first, then run the packager once per architecture
 repository root:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\package-release-v061-sm89.ps1 -Cards rtx4090,rtx4080s
-powershell -ExecutionPolicy Bypass -File scripts\package-release-v061-sm89.ps1 -Cards rtx5060ti
+powershell -ExecutionPolicy Bypass -File scripts\package-release.ps1 -Cards rtx4090,rtx4080s
+powershell -ExecutionPolicy Bypass -File scripts\package-release.ps1 -Cards rtx5060ti
 ```
 
-The first run creates `dist/ninfer-sm89-windows-x64-<version>/` with `sm128-rtx4090/` and
+The first run creates `dist/ninfer-windows-sm89-x64-<version>/` with `sm128-rtx4090/` and
 `sm80-rtx4080s/`; the second creates `dist/ninfer-sm120-windows-x64-<version>/` with
 `sm36-rtx5060ti/`. Each folder holds the executables, the vcpkg DLLs, its own `VERSION` and the
 launcher pair for that profile (`start-bonsai-rtx<card>.bat` + `start-qwen38-rtx<card>.bat`; the
@@ -39,5 +39,5 @@ and verify the published SHA-256 separately.
 The Windows bundle includes its FFmpeg/curl/zlib DLLs and requires NVIDIA driver 595 or newer and
 the Microsoft Visual C++ 2015-2022 x64 runtime.
 
-The Windows script is the delivered one; `scripts/package-release-v061-sm89.sh` is its Bash
+The Windows script is the delivered one; `scripts/package-release.sh` is its Bash
 counterpart for the Linux `sm_89` builds (the repository requires a `.sh` twin for every `.ps1`).

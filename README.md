@@ -1,7 +1,7 @@
-# NInfer-sm89 for Windows
+# NInfer for Windows
 
 > Personal fork of [JGamboa/ninfer-4090-windows](https://github.com/JGamboa/ninfer-4090-windows),
-> maintained at [zjwan461/ninfer-sm89-windows](https://github.com/zjwan461/ninfer-sm89-windows).
+> maintained at [zjwan461/ninfer-windows](https://github.com/zjwan461/ninfer-windows).
 > Measured on a 32 GB RTX 4080 SUPER as well: **[NINFER_4080S_BASELINE.md](NINFER_4080S_BASELINE.md)** -- decode 74.9 tok/s (MTP k=3), prefill 3.37k tok/s, 262144 context at 29.5 GB, and the finding that the 80-SM constant makes no measurable difference on that card.
 
 > The change relative to upstream: the target architecture and SM count are build options, so one
@@ -103,7 +103,7 @@ not part of that budget.
 ### 1. Get the binaries
 
 **Prebuilt (easiest):** download the archive for your card from the
-[latest release](https://github.com/zjwan461/ninfer-sm89-windows/releases/latest) and unzip it.
+[latest release](https://github.com/zjwan461/ninfer-windows/releases/latest) and unzip it.
 It needs only an NVIDIA driver 595 or newer and the
 [VC++ 2015-2022 x64 redistributable](https://aka.ms/vs/17/release/vc_redist.x64.exe): the CUDA
 runtime is built into the executables, and the zip includes the DLLs, a launcher pair per
@@ -118,6 +118,11 @@ above GitHub's 2 GiB release-asset cap:
 | | `sm80-rtx4080s/` | RTX 4080 SUPER |
 | `ninfer-sm120-windows-x64-0.7.0.zip` | `sm36-rtx5060ti/` | RTX 5060 Ti 16 GB |
 
+The archive names above are the 0.7.0 assets as published. From the next release the product is
+`ninfer-windows-<arch>-x64-<version>.zip` (`ninfer-windows-sm89-x64-*.zip`,
+`ninfer-windows-sm120-x64-*.zip`): the repository is no longer scoped to one compute
+capability, so the architecture moved out of the product name and into the asset name.
+
 A binary only runs on the architecture it was built for, so take the archive that matches your
 card. The 16 GB card is qualified on Bonsai only: the Qwen3.8-27B weights alone are 15.9 GiB, so
 its folder ships the Bonsai launcher. The earlier 0.6.1 asset has only the two `sm_89` folders; an
@@ -128,8 +133,8 @@ RTX 5060 Ti owner using that one builds from source with `-DCMAKE_CUDA_ARCHITECT
 CUDA on `PATH`:
 
 ```bat
-git clone https://github.com/zjwan461/ninfer-sm89-windows
-cd ninfer-sm89-windows
+git clone https://github.com/zjwan461/ninfer-windows
+cd ninfer-windows
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release ^
   -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake ^
   -DVCPKG_TARGET_TRIPLET=x64-windows -DCMAKE_CUDA_ARCHITECTURES=89
@@ -675,7 +680,7 @@ This fork descends from a chain of ports; each added what the next one builds on
 - [JGamboa/ninfer-4090-windows](https://github.com/JGamboa/ninfer-4090-windows) — the native
   Windows build, Ternary Bonsai 2 27B (converter, ternary format and kernels, vision), n-gram
   speculation, the concurrent-lane and prefill work, and the Qwen3.8 DFlash2 verification routes.
-- This repository ([zjwan461/ninfer-sm89-windows](https://github.com/zjwan461/ninfer-sm89-windows))
+- This repository ([zjwan461/ninfer-windows](https://github.com/zjwan461/ninfer-windows))
   — a fork of `JGamboa/ninfer-4090-windows` that turns the compile-time target SM count into the
   `NINFER_TARGET_SM_COUNT` build option, so the same `sm_89` source builds for the RTX 4090
   (128 SMs) or the RTX 4080 SUPER (80 SMs).

@@ -42,7 +42,7 @@ proyecto:
    numerada "Current state and next steps"). Anota el commit medido, el comando, el hardware y los
    números. Los resultados de Qwen3.8 van en `WINDOWS_PORT.md`.
 6. **Commits:** usa el formato Conventional Commits (`perf(...)`, `fix(...)`, `test(...)`,
-   `docs(...)`). Trabaja en la rama `main` del repo `zjwan461/ninfer-sm89-windows`.
+   `docs(...)`). Trabaja en la rama `main` del repo `zjwan461/ninfer-windows`.
    No subas un cambio de rendimiento sin haber pasado sus tests.
 
 ### Trampas de CUDA que ya nos mordieron en este proyecto

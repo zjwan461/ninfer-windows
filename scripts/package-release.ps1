@@ -2,7 +2,7 @@ param(
     # Optional subset of the two SM profiles to package, by card name. Packaging only the
     # available build (for example on an RTX 4080 SUPER machine without a 128-SM tree) keeps the
     # pack-only contract honest instead of forcing a throw:
-    #   powershell -ExecutionPolicy Bypass -File scripts\package-release-v061-sm89.ps1 -Cards rtx4080s
+    #   powershell -ExecutionPolicy Bypass -File scripts\package-release.ps1 -Cards rtx4080s
     [ValidateSet('rtx4090', 'rtx4080s', 'rtx5060ti')]
     [string[]]$Cards = @('rtx4090', 'rtx4080s', 'rtx5060ti')
 )
@@ -12,8 +12,8 @@ $ErrorActionPreference = 'Stop'
 # Fork-local release packager for the native Windows port.
 # Targets this fork's Ninja build trees (build/, build-4080s/, build-5060ti/) and bundles the three
 # qualified compile-time profiles: RTX 4090 and RTX 4080 SUPER (sm_89), RTX 5060 Ti (sm_120a).
-# One run packs one architecture: the sm_89 pair keeps the historical `sm89` product name, the
-# sm_120a card becomes `sm120`. Mixing them is rejected because the combined archive is over
+# One run packs one architecture: the sm_89 pair is the `sm89` product, the sm_120a card is the
+# `sm120` one. Mixing them is rejected because the combined archive is over
 # GitHub's 2 GiB release-asset cap.
 #
 # This fork is an sm_89 port: the attention wave geometry is a compile-time constant
@@ -25,18 +25,19 @@ $ErrorActionPreference = 'Stop'
 # build directory or product is missing. Build both profiles first (see
 # ninfer-windows-build-manual.md for the 80-SM tree), then run from the repository root:
 #
-#   powershell -ExecutionPolicy Bypass -File scripts\package-release-v061-sm89.ps1
+#   powershell -ExecutionPolicy Bypass -File scripts\package-release.ps1
 #
 # To ship only the profiles whose build trees exist, restrict the set with -Cards, for example on a
 # machine that only carries the 80-SM tree:
 #
-#   powershell -ExecutionPolicy Bypass -File scripts\package-release-v061-sm89.ps1 -Cards rtx4080s
+#   powershell -ExecutionPolicy Bypass -File scripts\package-release.ps1 -Cards rtx4080s
 #
-# A Bash counterpart (package-release-v061-sm89.sh) packages the Linux sm_89 builds so the
+# A Bash counterpart (package-release.sh) packages the Linux sm_89 builds so the
 # scripts\ pairs stay symmetric (scripts\check-linux-scripts.sh enforces that).
 
-$ReleaseTag = '0.7.0'
 $RepoRoot = Split-Path -Parent $PSScriptRoot
+# The repository VERSION is the product tag; the architecture token lives in the archive name.
+$ReleaseTag = (Get-Content -LiteralPath (Join-Path $RepoRoot 'VERSION') -Raw).Trim()
 $DistRoot = Join-Path $RepoRoot 'dist'
 
 # Per card: the subdirectory it occupies, the SM profile to verify, the build directories to look
@@ -71,7 +72,7 @@ switch ($ArchSet) {
               "run the script once per architecture, e.g. -Cards rtx4090,rtx4080s and -Cards rtx5060ti"
     }
 }
-$ProductName = "ninfer-$ArchToken-windows-x64-$ReleaseTag"
+$ProductName = "ninfer-windows-$ArchToken-x64-$ReleaseTag"
 $ProductRoot = Join-Path $DistRoot $ProductName
 $ArchivePath = Join-Path $DistRoot "$ProductName.zip"
 $ChecksumPath = Join-Path $DistRoot "SHA256SUMS-v$ReleaseTag-$ArchToken.txt"

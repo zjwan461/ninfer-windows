@@ -115,10 +115,10 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           # One archive per architecture: the three profiles together exceed GitHub's 2 GiB
-          # release-asset cap. The sm_89 pair keeps the historical `sm89` name, the RTX 5060 Ti
-          # ships as its own `sm120` product.
-          & .\scripts\package-release-v061-sm89.ps1 -Cards @('rtx4090', 'rtx4080s')
-          & .\scripts\package-release-v061-sm89.ps1 -Cards @('rtx5060ti')
+          # release-asset cap. The sm_89 pair is `ninfer-windows-sm89-x64-<version>.zip`; the
+          # RTX 5060 Ti ships as its own `ninfer-windows-sm120-x64-<version>.zip`.
+          & .\scripts\package-release.ps1 -Cards @('rtx4090', 'rtx4080s')
+          & .\scripts\package-release.ps1 -Cards @('rtx5060ti')
           Get-ChildItem dist -File | Select-Object Name, Length
 
       - name: Upload the archive

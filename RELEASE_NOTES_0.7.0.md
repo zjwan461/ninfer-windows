@@ -49,7 +49,7 @@ only `89` and `120a` and does not build `sm_86`.
   hosted Windows runner, packages one archive per architecture with the repository's own script,
   uploads both as build artifacts and attaches them to a `v*` tag's release. The runner has no GPU, so it proves the
   tree configures, compiles and links; kernel correctness still comes from `ctest` on a card.
-- **One release packager.** `scripts/package-release-v061-sm89.ps1` (and its Bash counterpart)
+- **One release packager.** `scripts/package-release.ps1` (and its Bash counterpart)
   replaces the upstream v0.4.0-v0.6.0 packagers; the older scripts and the `sm_86` Linux guide are
   removed, together with the completed fork work plans that were still in the repository root.
 

@@ -125,6 +125,11 @@ out = (out * sigmoid(Wgate x)) @ Wo                            # gate computed i
 is the `[16, 1024]` bank of bias-versus-distance profiles, and the two clip scales are the learned
 per-head multipliers applied before the clip.
 
+`ninfer::ops::causal_dconv_residual` implements the static short convolution the sliding-window
+layers use for k, v and both residual streams: a depthwise causal width-4 filter, the input added
+back, and the sum divided by `sqrt(5)`. The three-value window lives in a per-visit state buffer,
+which is why the loop's 48 visits need their own conv states rather than 24.
+
 `ninfer::ops::scaled_l2_clip` implements the projection-side normalisation for both the query
 path (head_dim 128, threshold 22.627) and the relative-state path (head_dim 16, threshold 8), with
 the learned per-head scale applied before the clip and the log-scaled `tau` applied after it on

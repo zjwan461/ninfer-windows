@@ -231,6 +231,26 @@ Two naming facts the loader depends on: the trailing file suffix is dropped (`wq
 layer before each global-attention layer. The loader encodes that rule; its meaning is still open
 and belongs with the block-residual mathematics in stage 2.
 
+## 8b. Reference oracle (available)
+
+The checkpoint is only published quantised, and `transformers` has no quantiser for its `modelopt`
+layout, so the reference cannot load it directly. `tests/inkling2/materialize_bf16.py` dequantises
+it once through the same `expert_matrix` the converter uses and writes a plain BF16 checkpoint;
+`tests/inkling2/dump_visits.py` then runs the reference and captures all 48 layer visits.
+
+Measured on one H200-class card (2026-11-23):
+
+| Check | Result |
+|---|---|
+| Load | `Inkling2LoopForConditionalGeneration`, 49.2 GiB VRAM, text stack at `model.language_model` |
+| Loss on a 38-token English passage | **1.969** |
+| `The capital of France is` (5 tokens) | top-1 ` Paris` at 27.29 |
+| Visits | 48, in the order prelude 0-5, core 6-17 three times, coda 18-23 |
+
+The BF16 materialisation is 52.8 GB and takes ~32 minutes; it exists to give stage 2 a target, not
+as a product. Anyone re-running it must expect the `causal_conv1d` fallback warning: the reference
+convolution is then pure PyTorch and slower, which is fine for a forward pass.
+
 ## 9. Drafter and vision (stage 4)
 
 `mtp.safetensors` is a separate 636 MB bf16 file with 54 tensors: `layers.{0..2}`, `markov_head.*`

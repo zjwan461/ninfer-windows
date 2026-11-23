@@ -125,6 +125,10 @@ out = (out * sigmoid(Wgate x)) @ Wo                            # gate computed i
 is the `[16, 1024]` bank of bias-versus-distance profiles, and the two clip scales are the learned
 per-head multipliers applied before the clip.
 
+`ninfer::ops::dynamic_short_conv` covers the global-attention variant: the four taps are a static
+per-channel filter plus a per-token filter projected from the layer input and shared inside a
+key/value head, and the residual is divided by `sqrt(2 * kernel + 1) = 3` rather than `sqrt(5)`.
+
 `ninfer::ops::causal_dconv_residual` implements the static short convolution the sliding-window
 layers use for k, v and both residual streams: a depthwise causal width-4 filter, the input added
 back, and the sum divided by `sqrt(5)`. The three-value window lives in a per-visit state buffer,

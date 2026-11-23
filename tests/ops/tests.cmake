@@ -27,7 +27,8 @@ set(ninfer_op_tests
   position
   relbias_attention
   scaled_l2_clip
-  causal_dconv_residual)
+  causal_dconv_residual
+  dynamic_short_conv)
 foreach(op IN LISTS ninfer_op_tests)
   ninfer_add_op_test(ninfer_${op}_test
     SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_${op}.cpp"

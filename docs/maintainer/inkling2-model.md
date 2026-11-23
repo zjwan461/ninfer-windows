@@ -243,7 +243,7 @@ module that may reuse the ops but not the wiring.
 |---|---|
 | 0 | this document; `tools/convert/inkling2.py --check` passes on the real checkpoint metadata |
 | 1 | **met**: artifact written, NVFP4 slots read back at cos 0.99986 (9e-3 relative to FP32 rounding), bf16 slots bit-exact |
-| 2 | text-only, greedy, 8K: all 48 visit hidden states within the tolerance the vLLM write-up measured (≈ FlashAttention-vs-PyTorch divergence), short prompts token-identical to the reference |
+| 2 | text-only, greedy, 8K: all 48 visit hidden states within the tolerance the vLLM write-up measured (≈ FlashAttention-vs-PyTorch divergence), short prompts token-identical to the reference. **Started**: `src/models/inkling2/config.cpp` parses and validates the artifact's text component (`visits = 48`, `kv_caches = 48`, `global_layers = 4`, core `[6,18)` × 3, `q_width = 3072`, `kv_width = 1024`, 128/8 experts, DSpark taps 5/23/41/48, vision depth 23); the registry recognises `Inkling2LoopForConditionalGeneration` / `inkling2_loop_text`. No loader, no kernels yet |
 | 3 | 48 KV + conv-state caches, 128K context on the 4080 SUPER, prefix reuse |
 | 4 | vision + DSpark; GSM8K and 32K perplexity within noise of the reference |
 | 5 | serving parity: chat template, reasoning effort, tool calls, `/v1/messages` |
@@ -254,7 +254,7 @@ Additive only; the shared files are `src/models/registry.cpp`, `src/models/CMake
 `src/ops/CMakeLists.txt` and the root `CMakeLists.txt`, and each gains lines, not restructuring.
 
 ```
-src/models/inkling2/          config, load, program, execution, state, frontend
+src/models/inkling2/          config (done), load, program, execution, state, frontend
 src/ops/relbias_attn/         relative bias + sink + gate + log scaling
 src/ops/sconv/                depthwise short convolution, kernel 4
 src/ops/attn_res/             message read, rank-64 controller, block residual

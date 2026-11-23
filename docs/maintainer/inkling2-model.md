@@ -381,6 +381,10 @@ module that may reuse the ops but not the wiring.
 | 2 | text-only, greedy, 8K: all 48 visit hidden states within the tolerance the vLLM write-up measured (≈ FlashAttention-vs-PyTorch divergence), short prompts token-identical to the reference. **Schedule**: `schedule.cpp` builds the 48 visits and the 24 message links, checked against the
 visit order the reference implementation actually produced.
 
+**First parity**: layer 0's attention sub-block reproduces the reference for one token, every
+stage checked separately: `attn_norm` exact, q 3.9e-3, k 3.9e-3, v 4.9e-4, sink exact, the attention
+output 2.0e-3 and the post-convolution output 3.9e-3 — all at BF16 storage rounding.
+
 **Loader**: `load.cpp` derives all 6790 text slots from the config and validates the built artifact end to end — 7212 bindings, no missing slot, no unexpected one, every shape and stored format checked.
 
 **Started**: `config.cpp` parses and validates the text component (`visits = 48`, `kv_caches = 48`, `global_layers = 4`, core `[6,18)` × 3, `q_width = 3072`, `kv_width = 1024`, 128/8 experts, DSpark taps 5/23/41/48, vision depth 23); `load.cpp` derives all 6396 text slots from that config and checks every binding's shape and stored format against the artifact, rejecting missing and unexpected parameters. Registry recognises `Inkling2LoopForConditionalGeneration` / `inkling2_loop_text`. No materialisation, no kernels yet |

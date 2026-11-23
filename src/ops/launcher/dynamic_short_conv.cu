@@ -32,8 +32,11 @@ __global__ void dynamic_short_conv_kernel(const __nv_bfloat16* __restrict__ x,
 
     float accumulator = 0.0F;
 #pragma unroll
-    for (int j = 0; j < kKernel; ++j) {
-        const int offset = token - (kKernel - 1) + j;
+    for (int lag = 0; lag < kKernel; ++lag) {
+        // The tap index is the backward distance: tap 0 weights the current token, tap 3 the token
+        // three steps back. The static convolution in this model uses the opposite (nn.Conv1d)
+        // order, which is why its current-token tap is the last one.
+        const int offset = token - lag;
         float sample = 0.0F;
         if (offset >= 0) {
             sample = __bfloat162float(x[base + offset]);
@@ -41,8 +44,8 @@ __global__ void dynamic_short_conv_kernel(const __nv_bfloat16* __restrict__ x,
             const int state_index = kState + offset;
             if (state_index >= 0) { sample = __bfloat162float(state[state_index]); }
         }
-        const float tap = __bfloat162float(static_weight[std::size_t(j) * channels + channel]) +
-                          __bfloat162float(dynamic[j]);
+        const float tap = __bfloat162float(static_weight[std::size_t(lag) * channels + channel]) +
+                          __bfloat162float(dynamic[lag]);
         accumulator += tap * sample;
     }
     out[base + token] = __float2bfloat16((accumulator + __bfloat162float(x[base + token])) *

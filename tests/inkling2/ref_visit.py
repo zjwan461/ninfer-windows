@@ -147,6 +147,9 @@ with safe_open(SHARD, framework='pt') as f:
         vn = rms(v_base, g('v_input_norm.weight'))
 
     tau = 1.0 + QALPHA * np.log(max(1.0 / QFLOOR, 1.0))
+    if os.environ.get("TAU", "1") == "0":
+        # Test switch: the log-scaled clip may not apply to full layers.
+        tau = 1.0
     wq, wk, wv = g('attn.wq_du.weight'), g('attn.wk_dv.weight'), g('attn.wv_dv.weight')
     qv = clip((wq.astype(np.float64) @ qn).reshape(24, 128), g('attn.q_l2_clip.scale'), QK_CLIP,
               1.0 if sliding else tau)
@@ -158,8 +161,9 @@ with safe_open(SHARD, framework='pt') as f:
     else:
         static = g('attn.k_sconv.static_w').reshape(4, 1024)
         dyn = (g('attn.k_sconv.weight_proj').astype(np.float64) @ kn).reshape(8, 4)
-        taps = static[3] + np.repeat(dyn[:, 3], 128)
-        kv = (taps * base_k + base_k) / 3.0
+        taps = static[0] + np.repeat(dyn[:, 0], 128)
+        divisor = float(os.environ.get("DIV", "3"))
+        kv = (taps * base_k + base_k) / divisor
     kk = clip(kv.reshape(8, 128), np.ones((8, 128), dtype=np.float32), QK_CLIP)
 
     base_v = (wv.astype(np.float64) @ vn).reshape(1024)
@@ -169,13 +173,17 @@ with safe_open(SHARD, framework='pt') as f:
     else:
         static = g('attn.v_sconv.static_w').reshape(4, 1024)
         dyn = (g('attn.v_sconv.weight_proj').astype(np.float64) @ vn).reshape(8, 4)
-        taps = static[3] + np.repeat(dyn[:, 3], 128)
-        vv = (taps * base_v + base_v) / 3.0
+        taps = static[0] + np.repeat(dyn[:, 0], 128)
+        vv = (taps * base_v + base_v) / float(os.environ.get("DIV", "3"))
     vv = rms(vv.reshape(8, 128))
 
     rel = clip((g('attn.wr_du.weight').astype(np.float64) @ qn).reshape(24, 16),
                g('attn.rel_l2_clip.scale'), REL_CLIP, 1.0 if sliding else tau)
     bias = (rel @ g('attn.rel_logits_proj.proj').astype(np.float64))[:, 0]
+    if os.environ.get("BIAS", "1") == "0":
+        # Full layers may be global and carry no relative bias at all; the switch exists to test
+        # that against the model's own output instead of against a reading of the source.
+        bias = np.zeros_like(bias)
     sink = g('attn.attn_sink_proj.weight').astype(np.float64) @ qn
     gate_w = 1.0 / (1.0 + np.exp(-(g('attn.gate_attn.weight').astype(np.float64) @ qn)))
 

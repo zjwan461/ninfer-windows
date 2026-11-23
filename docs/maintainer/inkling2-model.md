@@ -108,6 +108,29 @@ for. The same file renames the controller weights: `controllers.{q,k,v,mlp}.down
 `*_message_gate.down_proj.weight`, `gain_weight` becomes `message_gate_proj.weight` and
 `forget_weight` becomes `forget_gate_proj.weight`.
 
+## 3d. The two short-convolution tap orders
+
+The model has two short convolutions with **opposite tap conventions**, and reading one as the
+other shifts the whole key/value path:
+
+- `ShortConvolution` is an `nn.Conv1d` with `padding = kernel - 1`, so for a single token only the
+  **last** kernel index (`kernel - 1`) sees the current token; the earlier taps see padding.
+- `DynamicShortConvolution` indexes by **backward distance**: `static_weight[0]` weights the
+  current token and `static_weight[3]` the token three steps back. Its normaliser is
+  `sqrt(2 * kernel + 1)` = 3 for a kernel of four.
+
+Using tap 3 for the dynamic convolution made every full-attention layer's keys and values a
+three-step-back mix, which showed up as 3-5% error per full layer and 32% at the last visit. With
+tap 0 each full layer lands at 0.2-0.3%.
+
+## 3e. Reference dumps have to use the oracle's token
+
+`dump_stages.py` hooks the model's own submodules, which is the only comparison that does not
+share the engine's reading of the model source. It has to run with the token the visit oracle
+used, or every comparison is meaningless: the block states, the attention inputs and the logits
+all belong to a different prompt. `--token-id 1234` is the token the current oracle was recorded
+with; `layer0.in_00` matching `visit_in_0` exactly is the check that it is the right one.
+
 ## 3b. The layer pipeline
 
 Read from the reference, because it is not a plain pre-norm block and the executor has to match it

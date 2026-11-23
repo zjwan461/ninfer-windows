@@ -19,6 +19,9 @@ namespace ninfer::ops {
 //
 // `x` and `out` are contiguous BF16 [C, T]; `static_weight` is [4, C] (tap-major, unlike the static
 // convolution's [C, 4]); `dynamic_weight` is [T, heads * 4]; the state is [C, 3] oldest to newest.
+// The kernel taps are indexed by backward distance: tap 0 weights the current token and tap
+// kernel-1 the token kernel-1 steps back. The static convolution in the same model uses the
+// opposite (nn.Conv1d) order, so its current-token tap is the last one.
 void dynamic_short_conv(const Tensor& x, const Tensor& static_weight, const Tensor& dynamic_weight,
                         const Tensor& conv_state_in, Tensor& conv_state_out, Tensor& out,
                         int heads, cudaStream_t stream);

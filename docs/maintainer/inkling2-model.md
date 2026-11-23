@@ -59,6 +59,9 @@ architecture lands as an additive module (see §11).
   (48 controllers, 144 tensors). The merge is computed in FP32 end to end: both RMS norms, the
   rank-64 down projection's consumers, and the two `tanh` gates.
 
+  `ninfer::ops::message_merge` performs the blend in FP32; it is the only path by which one pass
+  reaches the next.
+
   The message itself is read by attention, not by a dot product: `middle_cycle_cross_pass_queries`
   and `middle_cycle_cross_pass_kv_queries` are the learned queries of the four sublayer inputs
   (12 core layers x 2 each, stacked as `[24, 2304]`), attending non-causally with scale

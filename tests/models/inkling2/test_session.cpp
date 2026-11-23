@@ -86,6 +86,27 @@ int main(int argc, char** argv) {
                 const std::string stage(name);
                 const std::string file = "layer" + std::to_string(visit) + "." ;
                 (void)file;
+                if (stage == "boundary_in") {
+                    std::vector<std::uint16_t> host(static_cast<std::size_t>(width));
+                    cudaMemcpy(host.data(), buffer, host.size() * 2, cudaMemcpyDeviceToHost);
+                    std::ofstream out("/tmp/session/boundary_" + std::to_string(visit) + "_" +
+                                      std::to_string(occurrence) + ".bin", std::ios::binary);
+                    out.write(reinterpret_cast<const char*>(host.data()),
+                              std::streamsize(host.size() * 2));
+                    return;
+                }
+                if (stage == "block_states") {
+                    const auto dump_path = std::filesystem::path("/tmp/session/") /
+                        ("layer" + std::to_string(visit) + ".block_" + std::to_string(occurrence) +
+                         ".bin");
+                    std::filesystem::create_directories(dump_path.parent_path());
+                    std::vector<std::uint16_t> host(static_cast<std::size_t>(width));
+                    cudaMemcpy(host.data(), buffer, host.size() * 2, cudaMemcpyDeviceToHost);
+                    std::ofstream out(dump_path, std::ios::binary);
+                    out.write(reinterpret_cast<const char*>(host.data()),
+                              std::streamsize(host.size() * 2));
+                    return;
+                }
                 if (stage == "final_states") {
                     std::vector<std::uint16_t> host(static_cast<std::size_t>(width));
                     cudaMemcpy(host.data(), buffer, host.size() * 2, cudaMemcpyDeviceToHost);

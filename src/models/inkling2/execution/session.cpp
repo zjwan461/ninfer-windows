@@ -378,6 +378,9 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
         Tensor state_kv(s.state_scratch, DType::BF16, {kKv, kConvState});
         Tensor state_hidden(s.state_scratch, DType::BF16, {kHidden, kConvState});
         cudaMemcpyAsync(s.h_in, s.h, kHidden * 2, cudaMemcpyDeviceToDevice, stream);
+        if (stage_sink && boundary) {
+            stage_sink(layer_index, "boundary_in", s.h_in, kHidden);
+        }
 
         // ---- attention input: read out of the block stack -----------------------------------
         const int queries = sliding ? 1 : 3;
@@ -388,6 +391,9 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
                 weights.index.attn_queries[static_cast<std::size_t>(layer_index)];
             Tensor query(dense_tensor(weights, query_slot).data, DType::FP32, {kHidden, queries});
             Tensor states(s.stack, DType::BF16, {kHidden, stack_length_now + 1});
+            if (stage_sink) {
+                stage_sink(layer_index, "block_states", s.stack, kHidden * (stack_length_now + 1));
+            }
             Tensor read_out(s.message, DType::BF16, {kHidden, queries});
             block_residual_read(query, states, kEps, read_out, stream);
             cudaMemcpyAsync(s.attn_in, s.message, kHidden * 2, cudaMemcpyDeviceToDevice, stream);

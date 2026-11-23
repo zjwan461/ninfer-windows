@@ -131,6 +131,22 @@ used, or every comparison is meaningless: the block states, the attention inputs
 all belong to a different prompt. `--token-id 1234` is the token the current oracle was recorded
 with; `layer0.in_00` matching `visit_in_0` exactly is the check that it is the right one.
 
+## 9b. What fits on which card
+
+The pass-through artifact is 18.33 GiB, and the routed experts are 14.87 GiB of it (81%): 9.49 GiB
+of NVFP4 for the loop core's twelve layers and 5.38 GiB of q8 for the coda's four.
+
+- **RTX 4080 SUPER 32 GB** holds it as it stands, with a 4096-token context worth about 400 MB of
+  caches.
+- **RTX 5060 Ti 16 GB** does not. It needs the experts under about 10.5 GiB, and the cheapest route
+  there needs no new format: the coda's experts are q8 only because the converter had a values path
+  for those layers, and requantising them to NVFP4 takes them from 5.38 to 2.85 GiB, for 15.8 GiB
+  total. Quantising the attention projections and the unembedding as well, which are still BF16,
+  is worth another 1.5 GiB and lands near 14.3.
+
+A Q3 format would go further, but it means a codec, a kernel and their tests; the numbers above
+say it is not needed for the 16 GB target, so it stays unbuilt.
+
 ## 8c. The session reproduces the reference
 
 `execution/session.cpp` runs the 48 visits with a cache per visit and reproduces the recorded

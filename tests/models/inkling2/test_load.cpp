@@ -8,6 +8,7 @@
 #include "artifact/fixture.h"
 #include "artifact/reader.h"
 #include "models/inkling2/load.h"
+#include "models/inkling2/materialize.h"
 #include "models/inkling2/parameters.h"
 
 #include <cuda_runtime.h>
@@ -32,10 +33,13 @@ std::string value_of(int argc, char** argv, int& index, const std::string& flag)
 int main(int argc, char** argv) {
     try {
         std::filesystem::path path;
+        bool materialize = false;
         for (int i = 1; i < argc; ++i) {
             const std::string arg(argv[i]);
             if (arg == "--artifact") {
                 path = value_of(argc, argv, i, arg);
+            } else if (arg == "--materialize") {
+                materialize = true;
             } else {
                 throw std::invalid_argument("unknown argument " + arg);
             }
@@ -107,6 +111,23 @@ int main(int argc, char** argv) {
             rejected = true;
         }
         require(rejected, "a two-pass config must be rejected");
+        if (materialize) {
+            // Allocates the whole text model on the device; opt-in because a 16 GB card cannot
+            // hold it and the default test run must stay device-light.
+            std::uint64_t expected = 0;
+            for (const auto& slot : bound) {
+                expected += directory.tensor(slot.handle).bytes;
+            }
+            DeviceContext device;
+            auto weights = models::inkling2::materialize_text(reader, config, device);
+            require(weights.slots.size() == bound.size(), "materialised slot count differs");
+            require(weights.device_bytes == expected, "H2D did not cover every slot byte");
+            require(weights.index.layers.size() == config.num_hidden_layers,
+                    "role index does not follow the config");
+            std::cout << "materialised " << weights.device_bytes / (1024.0 * 1024.0 * 1024.0)
+                      << " GiB in " << weights.slots.size() << " weights, reserved "
+                      << weights.reserved_bytes / (1024.0 * 1024.0 * 1024.0) << " GiB\n";
+        }
         std::cout << "ok: 6790 slots, 48 visits, config validated\n";
         return 0;
     } catch (const std::exception& error) {

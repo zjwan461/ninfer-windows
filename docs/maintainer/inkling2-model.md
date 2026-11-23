@@ -165,6 +165,11 @@ out = (out * sigmoid(Wgate x)) @ Wo                            # gate computed i
 is the `[16, 1024]` bank of bias-versus-distance profiles, and the two clip scales are the learned
 per-head multipliers applied before the clip.
 
+`ninfer::ops::block_residual_read` is the block attention residual: one or three learned FP32
+queries attending non-causally over the normalized `[block_states, partial]` stack with scale
+`1/sqrt(hidden)`. It is the same three lines of math as the causal attention but over a stack of
+one to a few vectors, so it is its own Op.
+
 `ninfer::ops::head_rmsnorm` is the value path's normalisation: the same reduction as `rmsnorm`
 without a gain vector, which the checkpoint declares with `use_value_norm_no_gamma`.
 

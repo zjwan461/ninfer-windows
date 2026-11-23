@@ -37,6 +37,7 @@ def main() -> None:
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--token-id", type=int, required=True)
+    parser.add_argument("--layer", type=int, default=0, help="which decoder layer to capture")
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
 
@@ -44,8 +45,10 @@ def main() -> None:
         args.model, dtype=torch.bfloat16, device_map="cuda", low_cpu_mem_usage=True
     ).eval()
     layers = find_text_stack(model)
+    layer0 = layers[args.layer]
 
     captured: dict[str, np.ndarray] = {}
+    tag = f"layer{args.layer}"
 
     def capture(name):
         def hook(module, inputs, output):
@@ -56,20 +59,28 @@ def main() -> None:
     def capture_input(module, args):
         # A pre-hook must return None (or replacement args); returning the captured array would be
         # read as a replacement argument list, which is how this first failed.
-        captured["layer0_in"] = args[0].detach().float().cpu().numpy()
+        captured[f"{tag}_in"] = args[0].detach().float().cpu().numpy()
 
     handles = [
-        layers[0].register_forward_pre_hook(capture_input),
-        layers[0].input_layernorm.register_forward_hook(capture("layer0_ln")),
-        layers[0].self_attn.q_proj.register_forward_hook(capture("layer0_q")),
-        layers[0].self_attn.k_proj.register_forward_hook(capture("layer0_k")),
-        layers[0].self_attn.v_proj.register_forward_hook(capture("layer0_v")),
-        layers[0].self_attn.sink_proj.register_forward_hook(capture("layer0_sink")),
-        layers[0].self_attn.relative_position_bias.register_forward_hook(
-            capture("layer0_relbias")),
-        layers[0].self_attn.register_forward_hook(capture("layer0_attnpre")),
-        layers[0].post_attention_convolution.register_forward_hook(capture("layer0_attn")),
-        layers[0].register_forward_hook(capture("layer0_out")),
+        layer0.register_forward_pre_hook(capture_input),
+        layer0.input_layernorm.register_forward_hook(capture(f"{tag}_ln")),
+        *([layer0.attention_input.register_forward_hook(
+            lambda m, i, o: captured.__setitem__(
+                f"{tag}_attn_input",
+                np.reshape((o[0] if isinstance(o, tuple) else o).detach().float().cpu().numpy(),
+                           -1)))] if getattr(layer0, "attention_input", None) is not None else []),
+        layer0.self_attn.q_proj.register_forward_hook(capture(f"{tag}_q")),
+        layer0.self_attn.k_proj.register_forward_hook(capture(f"{tag}_k")),
+        layer0.self_attn.v_proj.register_forward_hook(capture(f"{tag}_v")),
+        layer0.self_attn.sink_proj.register_forward_hook(capture(f"{tag}_sink")),
+        layer0.self_attn.relative_position_bias.register_forward_hook(
+            capture(f"{tag}_relbias")),
+        layer0.self_attn.register_forward_hook(capture(f"{tag}_attnpre")),
+        layer0.post_attention_convolution.register_forward_hook(capture(f"{tag}_attn")),
+        layer0.post_attention_layernorm.register_forward_hook(capture(f"{tag}_mlp_in")),
+        layer0.mlp.register_forward_hook(capture(f"{tag}_mlp_pre")),
+        layer0.post_mlp_convolution.register_forward_hook(capture(f"{tag}_mlp")),
+        layer0.register_forward_hook(capture(f"{tag}_out")),
     ]
 
     ids = torch.tensor([[args.token_id]], dtype=torch.long, device="cuda")
@@ -78,8 +89,9 @@ def main() -> None:
     for handle in handles:
         handle.remove()
 
-    for name in ("layer0_in", "layer0_ln", "layer0_q", "layer0_k", "layer0_v", "layer0_sink",
-                 "layer0_relbias", "layer0_attnpre", "layer0_attn", "layer0_out"):
+    for name in (f"{tag}_in", f"{tag}_ln", f"{tag}_q", f"{tag}_k", f"{tag}_v", f"{tag}_sink",
+                 f"{tag}_relbias", f"{tag}_attnpre", f"{tag}_attn", f"{tag}_out",
+                 f"{tag}_attn_input", f"{tag}_mlp_in", f"{tag}_mlp_pre", f"{tag}_mlp"):
         if name not in captured:
             raise SystemExit(f"hook {name} never fired")
         array = captured[name].reshape(1, -1).astype(np.float32)

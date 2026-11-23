@@ -27,3 +27,8 @@ ninfer_add_test(ninfer_inkling2_layer0_artifact_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_layer0_artifact.cpp"
   LIBRARIES ninfer_model_loading ninfer_ops)
 set_tests_properties(ninfer_inkling2_layer0_artifact_test PROPERTIES SKIP_RETURN_CODE 77)
+
+ninfer_add_test(ninfer_inkling2_visits_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_visits.cpp"
+  LIBRARIES ninfer_model_loading ninfer_ops)
+set_tests_properties(ninfer_inkling2_visits_test PROPERTIES SKIP_RETURN_CODE 77)

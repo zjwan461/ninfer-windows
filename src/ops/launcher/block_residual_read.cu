@@ -96,9 +96,9 @@ __global__ void block_residual_read_kernel(const float* __restrict__ query,
 
 void block_residual_read_launch(const Tensor& query, const Tensor& states, float eps, Tensor& out,
                                 cudaStream_t stream) {
-    const int queries = query.ne[0];
-    const int hidden = query.ne[1];
-    const int count = states.ne[0];
+    const int hidden = query.ne[0];
+    const int queries = query.ne[1];
+    const int count = states.ne[1];
     if (queries <= 0 || hidden <= 0 || count <= 0) { return; }
     const float scale = 1.0F / sqrtf(float(hidden));
     block_residual_read_kernel<<<queries, 256, 0, stream>>>(

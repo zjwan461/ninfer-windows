@@ -13,8 +13,9 @@ namespace ninfer::ops {
 //   logits[q, s]  = dot(query[q, :], s_norm[s, :]) / sqrt(hidden)
 //   out[q, :]     = sum_s softmax(logits[q, :])[s] * s_norm[s, :]
 //
-// Both operands are contiguous BF16 with `hidden` as the fastest dimension: `query` is
-// [queries, hidden] and `states` is [states, hidden]; `out` is [queries, hidden]. The reference
+// `query` is contiguous FP32 with `hidden` as the fastest dimension and the query count on ne[1];
+// `states` is the same shape convention (hidden fastest, one row per block state) and `out`
+// matches `query`. The reference
 // runs this in FP32 over the FP32 queries, so the queries are FP32 here and the states are the
 // BF16 stack. `states` may be small (one entry per finished block), which is why this is a
 // separate Op rather than a call into the causal attention kernel.

@@ -23,9 +23,11 @@ void block_residual_read(const Tensor& query, const Tensor& states, float eps, T
     if (!(eps > 0.0F) || !std::isfinite(eps)) {
         throw std::invalid_argument("block_residual_read: eps must be positive and finite");
     }
-    if (query.ne[0] <= 0 || query.ne[1] <= 0 || states.ne[0] <= 0 ||
-        states.ne[1] != query.ne[1] || out.ne[0] != query.ne[0] || out.ne[1] != query.ne[1]) {
-        throw std::invalid_argument("block_residual_read: query [q, h], states [s, h], out [q, h]");
+    // ne[0] is the fastest dimension, so the row width is hidden and the row count is ne[1].
+    if (query.ne[0] <= 0 || query.ne[1] <= 0 || states.ne[0] != query.ne[0] ||
+        states.ne[1] <= 0 || out.ne[0] != query.ne[0] || out.ne[1] != query.ne[1]) {
+        throw std::invalid_argument(
+            "block_residual_read: query [hidden, q], states [hidden, s], out [hidden, q]");
     }
 
     detail::block_residual_read_launch(query, states, eps, out, stream);

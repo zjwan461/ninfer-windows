@@ -91,9 +91,9 @@ int run_case(int queries, int states, int hidden, std::uint32_t seed) {
     cudaMemcpy(d_query, query.data(), query.size() * 4, cudaMemcpyHostToDevice);
     cudaMemcpy(d_states, stack.data(), stack.size() * 2, cudaMemcpyHostToDevice);
 
-    Tensor t_query(d_query, DType::FP32, {queries, hidden});
-    Tensor t_states(d_states, DType::BF16, {states, hidden});
-    Tensor t_out(d_out, DType::BF16, {queries, hidden});
+    Tensor t_query(d_query, DType::FP32, {hidden, queries});
+    Tensor t_states(d_states, DType::BF16, {hidden, states});
+    Tensor t_out(d_out, DType::BF16, {hidden, queries});
     block_residual_read(t_query, t_states, kEps, t_out, nullptr);
     if (cudaDeviceSynchronize() != cudaSuccess) {
         std::cerr << "FAIL: kernel error\n";

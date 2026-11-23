@@ -117,8 +117,16 @@ Index build_index(const std::vector<BoundSlot>& slots, const Config& config) {
             if (layer >= index.layers.size()) {
                 throw ArtifactError("Inkling2: " + name + " exceeds the layer count");
             }
-            if (kind == "attn_queries") { index.attn_queries.resize(config.num_hidden_layers, -1);
-                                          assign(index.attn_queries[layer], here, name); continue; }
+            if (kind == "attn_queries") {
+                // The checkpoint stores one entry per layer *with* an attention residual read,
+                // i.e. layers 1..N-1, so its index is one behind the layer it belongs to.
+                index.attn_queries.resize(config.num_hidden_layers, -1);
+                if (layer + 1 >= index.attn_queries.size()) {
+                    throw ArtifactError("Inkling2: " + name + " exceeds the layer count");
+                }
+                assign(index.attn_queries[layer + 1], here, name);
+                continue;
+            }
             if (kind == "mlp_queries") { index.mlp_queries.resize(config.num_hidden_layers, -1);
                                          assign(index.mlp_queries[layer], here, name); continue; }
             throw ArtifactError("Inkling2: unknown residual query " + name);

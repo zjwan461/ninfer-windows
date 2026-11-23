@@ -36,6 +36,10 @@ def main() -> None:
     parser.add_argument("--out", type=Path, required=True, help=".npz with the 48 visits")
     parser.add_argument("--prompt", default="The capital of France is")
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--raw", type=Path, default=None,
+                        help="also write visit_in_<i>.bin / visit_out_<i>.bin as float32")
+    parser.add_argument("--token-id", type=int, default=None,
+                        help="bypass the tokenizer and feed exactly this one token")
     args = parser.parse_args()
 
     model = AutoModelForMultimodalLM.from_pretrained(
@@ -51,11 +55,22 @@ def main() -> None:
             visits.append((index, hidden.detach().float().cpu().numpy()))
         return hook
 
+    inputs_seen: list[np.ndarray] = []
+
+    def input_hook(module, args_):
+        inputs_seen.append(args_[0].detach().float().cpu().numpy())
+
     handles = [layer.register_forward_hook(hook_for(i))
                for i, layer in enumerate(find_text_stack(model))]
+    stack = find_text_stack(model)
+    handles += [layer.register_forward_pre_hook(input_hook) for layer in stack]
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)
-    ids = tokenizer(args.prompt, return_tensors="pt").input_ids.to(args.device)
+    if args.token_id is None:
+        ids = tokenizer(args.prompt, return_tensors="pt").input_ids.to(args.device)
+    else:
+        ids = torch.tensor([[args.token_id]], dtype=torch.long, device=args.device)
+        args.prompt = repr(args.token_id)
     with torch.no_grad():
         out = model(input_ids=ids, use_cache=False)
     for handle in handles:
@@ -71,8 +86,19 @@ def main() -> None:
     for index, (layer, hidden) in enumerate(visits):
         print(f"  visit {index:2d} layer {layer:2d} std {hidden.std():.5f}")
 
+    if args.raw is not None:
+        args.raw.mkdir(parents=True, exist_ok=True)
+        for index, (_, hidden) in enumerate(visits):
+            np.ascontiguousarray(hidden[0].reshape(-1), dtype=np.float32).tofile(
+                args.raw / f"visit_out_{index}.bin")
+        for index, seen in enumerate(inputs_seen):
+            np.ascontiguousarray(np.reshape(seen[0], -1), dtype=np.float32).tofile(
+                args.raw / f"visit_in_{index}.bin")
+        print("raw buffers in", args.raw)
+
     np.savez(args.out,
              hidden=np.stack([v[1][0] for v in visits]),
+             hidden_in=np.stack([np.reshape(i[0], -1) for i in inputs_seen]),
              layers=np.array([v[0] for v in visits]),
              logits=logits, ids=ids.cpu().numpy())
     print("saved", args.out)

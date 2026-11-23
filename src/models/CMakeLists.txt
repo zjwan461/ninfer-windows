@@ -11,6 +11,7 @@ target_link_libraries(ninfer_model_runtime
 
 include(qwen3_5/loading_sources.cmake)
 include(inkling2/loading_sources.cmake)
+include(inkling2/execution_sources.cmake)
 include(qwen3_5/frontend_sources.cmake)
 include(qwen3_5/execution_sources.cmake)
 include(qwen3_5/program_sources.cmake)

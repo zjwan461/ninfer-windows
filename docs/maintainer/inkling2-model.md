@@ -125,6 +125,12 @@ out = (out * sigmoid(Wgate x)) @ Wo                            # gate computed i
 is the `[16, 1024]` bank of bias-versus-distance profiles, and the two clip scales are the learned
 per-head multipliers applied before the clip.
 
+The decode half of this is implemented as `ninfer::ops::relbias_attention`: one warp per query
+head, online softmax over the visible cache, the sink entering the normaliser as one extra logit
+with no value, and the gate folded into the output. It matches an FP64 oracle to 1.6e-3 on full,
+sliding-window, single-token and 2048-token caches whose far distances fall outside the bias
+horizon.
+
 `attn_res` block residuals (`n_layers_per_attn_res_block = 6`,
 `attn_res_normalize_values = true`) run once per group of six layers, so one core pass produces
 exactly two blocks. Combined with the loop this means the residual stream is renormalised six

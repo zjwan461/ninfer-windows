@@ -386,7 +386,24 @@ module that may reuse the ops but not the wiring.
 | 2 | text-only, greedy, 8K: all 48 visit hidden states within the tolerance the vLLM write-up measured (≈ FlashAttention-vs-PyTorch divergence), short prompts token-identical to the reference. **Schedule**: `schedule.cpp` builds the 48 visits and the 24 message links, checked against the
 visit order the reference implementation actually produced.
 
-**First parity**: layer 0's MLP sub-block also matches: the router selects the same eight experts
+**Layer 0 parity**: the whole layer reproduces the reference for one token, 1.6e-2 of BF16 storage
+on a hidden state of magnitude 1.5, with every stage checked on the way:
+
+```
+rmsnorm(attn_norm)                       max|err| 0
+q after scale+clip                       max|err| 3.9e-3
+k after conv+clip                        max|err| 3.9e-3
+v after conv+rmsnorm                     max|err| 4.9e-4
+sink                                     max|err| 0
+self_attn output (after Wo)              max|err| 2.0e-3
+block read + post_attention_layernorm    max|err| 1.0e-2
+whole layer                              max|err| 1.6e-2
+```
+
+That exercises the block-boundary path: layer 0 does not add a residual, it pushes the pre-layer
+state into `block_states` and reads the MLP input back out with a learned query.
+
+**MLP sub-block**: matches: the router selects the same eight experts
 (its order differs, which the reference allows with `sorted=false`) with weights agreeing to 6e-7,
 and the accumulated expert output lands within 1.8e-2 of the reference, which is BF16 storage at
 that magnitude over 8 x 2304-term sums.

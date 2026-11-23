@@ -1,4 +1,4 @@
-// Layer 0 attention sub-block parity against the reference implementation.
+// Layer 0 parity against the reference implementation: both sub-blocks and the residual wiring.
 //
 //   ninfer_inkling2_layer0_attention_test --artifact <artifact> --fixture <dir>
 //
@@ -8,6 +8,7 @@
 
 #include "artifact/binder.h"
 #include "artifact/reader.h"
+#include "artifact/schema.h"
 #include "core/device.h"
 #include "models/inkling2/config.h"
 #include "models/inkling2/materialize.h"
@@ -18,6 +19,9 @@
 #include "ninfer/ops/relbias_attention.h"
 #include "ninfer/ops/rmsnorm.h"
 #include "ninfer/ops/scaled_l2_clip.h"
+#include "ninfer/ops/block_residual_read.h"
+#include "ninfer/ops/moe_router.h"
+#include "ninfer/ops/softcapped_swiglu.h"
 
 #include <cuda_runtime.h>
 
@@ -73,6 +77,24 @@ std::vector<float> read_f32(const std::filesystem::path& path) {
     return data;
 }
 
+std::vector<std::uint16_t> read_bf16(const std::filesystem::path& path) {
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream) { throw std::runtime_error("cannot open " + path.string()); }
+    stream.seekg(0, std::ios::end);
+    const auto bytes = stream.tellg();
+    stream.seekg(0);
+    std::vector<std::uint16_t> data(static_cast<std::size_t>(bytes) / 2);
+    stream.read(reinterpret_cast<char*>(data.data()), bytes);
+    return data;
+}
+
+void* upload(const void* host, std::size_t bytes) {
+    void* device = nullptr;
+    cudaMalloc(&device, bytes);
+    cudaMemcpy(device, host, bytes, cudaMemcpyHostToDevice);
+    return device;
+}
+
 void* upload_bf16(const std::vector<std::uint16_t>& host) {
     void* device = nullptr;
     cudaMalloc(&device, host.size() * 2);
@@ -104,6 +126,8 @@ int main(int argc, char** argv) {
         const auto stage_k = read_f32(fixture / "layer0_k.bin");
         const auto stage_v = read_f32(fixture / "layer0_v.bin");
         const auto stage_sink = read_f32(fixture / "layer0_sink.bin");
+        const auto expected_mlp_in = read_f32(fixture / "layer0_mlp_in.bin");
+        const auto expected_out = read_f32(fixture / "layer0_out.bin");
         const auto expected = read_f32(fixture / "layer0_attn.bin");
         if (input.size() != 2304 || expected.size() != 2304) {
             throw std::runtime_error("fixture must hold one 2304-wide token");
@@ -280,26 +304,177 @@ int main(int argc, char** argv) {
             return 1;
         }
 
+        // ---- MLP half -------------------------------------------------------------------
+        // Layer 0 is a block boundary, so the attention output *is* the residual here; the
+        // pre-layer state joins block_states and the MLP input is read out of that stack.
+        void* d_states = nullptr;
+        cudaMalloc(&d_states, 2 * 2304 * 2);
+        cudaMemcpy(d_states, d_input, 2304 * 2, cudaMemcpyDeviceToHost); // placeholder, replaced below
+        cudaMemcpy(static_cast<char*>(d_states), d_input, 2304 * 2, cudaMemcpyDeviceToDevice);
+        cudaMemcpy(static_cast<char*>(d_states) + 2304 * 2, d_conv_out, 2304 * 2,
+                   cudaMemcpyDeviceToDevice);
+
+        const auto query_index = weights.index.mlp_queries[0];
+        if (query_index < 0) { throw std::runtime_error("layer 0 has no mlp residual query"); }
+        auto query = models::inkling2::dense_tensor(weights, query_index);
+        // The reference keeps these queries in FP32; the artifact stores them that way too.
+        void* d_query = nullptr;
+        cudaMalloc(&d_query, 2304 * 4);
+        cudaMemcpy(d_query, query.data, 2304 * 4, cudaMemcpyDeviceToDevice);
+
+        void* d_mlp_in = nullptr;
+        cudaMalloc(&d_mlp_in, 2304 * 2);
+        Tensor t_query(d_query, DType::FP32, {1, 2304});
+        Tensor t_states(d_states, DType::BF16, {2, 2304});
+        Tensor t_mlp_in(d_mlp_in, DType::BF16, {1, 2304});
+        block_residual_read(t_query, t_states, 1.0e-6F, t_mlp_in, stream);
+
+        // post_attention_layernorm on the read-out state.
+        void* d_mlp_norm = nullptr;
+        cudaMalloc(&d_mlp_norm, 2304 * 2);
+        Tensor t_mlp_norm_in(d_mlp_in, DType::BF16, {2304, 1});
+        Tensor t_mlp_norm(d_mlp_norm, DType::BF16, {2304, 1});
+        rmsnorm(t_mlp_norm_in,
+                models::inkling2::dense_tensor(weights, layer[models::inkling2::Role::MlpNorm]),
+                1.0e-6F, false, t_mlp_norm, stream);
+        compare_stage("block read + post_attention_layernorm", d_mlp_norm, expected_mlp_in);
+
+        // Router and the eight experts.
+        auto gate = models::inkling2::dense_tensor(weights, layer[models::inkling2::Role::MlpGate]);
+        std::vector<float> gate_f32(std::size_t(128) * 2304);
+        {
+            std::vector<std::uint16_t> host(std::size_t(128) * 2304);
+            cudaMemcpy(host.data(), gate.data, host.size() * 2, cudaMemcpyDeviceToHost);
+            for (std::size_t i = 0; i < host.size(); ++i) { gate_f32[i] = from_bf16(host[i]); }
+        }
+        auto bias = models::inkling2::dense_tensor(weights,
+                                                   layer[models::inkling2::Role::MlpGateBias]);
+        void* d_gate_f32 = upload(gate_f32.data(), gate_f32.size() * 4);
+        void* d_indices = nullptr;
+        void* d_weights = nullptr;
+        cudaMalloc(&d_indices, 8 * sizeof(std::int32_t));
+        cudaMalloc(&d_weights, 8 * sizeof(float));
+        Tensor t_gate_f32(d_gate_f32, DType::FP32, {128, 2304});
+        Tensor t_bias(bias.data, DType::FP32, {128});
+        Tensor t_indices(d_indices, DType::I32, {8, 1});
+        Tensor t_router_weights(d_weights, DType::FP32, {8, 1});
+        moe_router(t_mlp_norm, t_gate_f32, t_bias, 8, 8.0F, t_indices, t_router_weights, stream);
+
+        std::vector<std::int32_t> host_indices(8);
+        std::vector<float> host_weights(8);
+        cudaMemcpy(host_indices.data(), d_indices, 8 * sizeof(std::int32_t), cudaMemcpyDeviceToHost);
+        cudaMemcpy(host_weights.data(), d_weights, 8 * sizeof(float), cudaMemcpyDeviceToHost);
+
+        // The fixture names its expert files in the reference's order, which is not the router's
+        // order (the reference selects with sorted=false), so pair by expert id.
+        const auto reference_router = artifact::parse_json(
+            [&] {
+                std::ifstream stream(fixture / "layer0_router.json");
+                return std::string(std::istreambuf_iterator<char>(stream),
+                                   std::istreambuf_iterator<char>());
+            }(),
+            "router");
+        std::vector<std::int32_t> reference_indices;
+        for (const auto& value : reference_router.at("indices")) {
+            reference_indices.push_back(value.get<std::int32_t>());
+        }
+
+        std::vector<double> accumulator(2304, 0.0);
+        for (std::size_t slot = 0; slot < 8; ++slot) {
+            const auto expert = reference_indices[slot];
+            std::size_t mine = 8;
+            for (std::size_t j = 0; j < 8; ++j) {
+                if (host_indices[j] == expert) { mine = j; }
+            }
+            if (mine == 8) {
+                std::cerr << "FAIL: router did not select expert " << expert << "\n";
+                return 1;
+            }
+            const double weight = double(host_weights[mine]);
+            const auto w13 = read_bf16(fixture / ("expert_" + std::to_string(slot) + "_w13.bin"));
+            const auto w2 = read_bf16(fixture / ("expert_" + std::to_string(slot) + "_w2.bin"));
+            void* d_w13 = upload(w13.data(), w13.size() * 2);
+            void* d_w2 = upload(w2.data(), w2.size() * 2);
+            void* d_up = nullptr;
+            void* d_act = nullptr;
+            void* d_down = nullptr;
+            cudaMalloc(&d_up, 2304 * 2);
+            cudaMalloc(&d_act, 1152 * 2);
+            cudaMalloc(&d_down, 2304 * 2);
+
+            Weight weight13{};
+            weight13.qdata = d_w13; weight13.qtype = QType::BF16;
+            weight13.n = 2304; weight13.k = 2304; weight13.ndim = 2;
+            weight13.shape[0] = 2304; weight13.shape[1] = 2304;
+            Weight weight2{};
+            weight2.qdata = d_w2; weight2.qtype = QType::BF16;
+            weight2.n = 2304; weight2.k = 1152; weight2.ndim = 2;
+            weight2.shape[0] = 2304; weight2.shape[1] = 1152;
+
+            Tensor t_up(d_up, DType::BF16, {2304, 1});
+            Tensor t_act(d_act, DType::BF16, {1152, 1});
+            Tensor t_down(d_down, DType::BF16, {2304, 1});
+            linear(t_mlp_norm, weight13, t_up, stream);
+            softcapped_swiglu(t_up, 4.0F, 25.0F, t_act, stream);
+            linear(t_act, weight2, t_down, stream);
+
+            std::vector<std::uint16_t> host_down(2304);
+            cudaMemcpy(host_down.data(), d_down, 2304 * 2, cudaMemcpyDeviceToHost);
+            for (std::size_t i = 0; i < 2304; ++i) {
+                accumulator[i] += weight * double(from_bf16(host_down[i]));
+            }
+            cudaFree(d_w13); cudaFree(d_w2); cudaFree(d_up); cudaFree(d_act); cudaFree(d_down);
+        }
+
+        std::vector<std::uint16_t> host_moe(2304);
+        for (std::size_t i = 0; i < 2304; ++i) { host_moe[i] = to_bf16(float(accumulator[i])); }
+        void* d_moe = upload(host_moe.data(), host_moe.size() * 2);
+        Tensor t_moe(d_moe, DType::BF16, {2304, 1});
+
+        // post_mlp_convolution, then the residual add (attention output is the residual for a
+        // block-boundary layer).
+        auto mlp_conv = models::inkling2::dense_tensor(weights,
+                                                       layer[models::inkling2::Role::MlpSconv]);
+        Tensor mlp_conv_2d(mlp_conv.data, DType::BF16, {2304, 4});
+        void* d_mlp_conv = nullptr;
+        void* d_mlp_state = nullptr;
+        void* d_mlp_state_out = nullptr;
+        cudaMalloc(&d_mlp_conv, 2304 * 2);
+        cudaMalloc(&d_mlp_state, 2304 * 3 * 2);
+        cudaMalloc(&d_mlp_state_out, 2304 * 3 * 2);
+        cudaMemset(d_mlp_state, 0, 2304 * 3 * 2);
+        Tensor t_mlp_conv(d_mlp_conv, DType::BF16, {2304, 1});
+        Tensor t_mlp_state(d_mlp_state, DType::BF16, {2304, 3});
+        Tensor t_mlp_state_out(d_mlp_state_out, DType::BF16, {2304, 3});
+        causal_dconv_residual(t_moe, mlp_conv_2d, t_mlp_state, t_mlp_state_out, t_mlp_conv, stream);
+
+        std::vector<std::uint16_t> host_conv(2304);
+        cudaMemcpy(host_conv.data(), d_mlp_conv, 2304 * 2, cudaMemcpyDeviceToHost);
+
         std::vector<std::uint16_t> got(2304);
         cudaMemcpy(got.data(), d_conv_out, got.size() * 2, cudaMemcpyDeviceToHost);
+        for (std::size_t i = 0; i < 2304; ++i) {
+            const float residual = from_bf16(got[i]); // layer 0 is a boundary: attn output only
+            got[i] = to_bf16(residual + from_bf16(host_conv[i]));
+        }
 
         double worst = 0.0;
         double worst_ratio = 0.0;
         std::size_t worst_index = 0;
         for (std::size_t i = 0; i < got.size(); ++i) {
-            const double error = std::fabs(double(from_bf16(got[i])) - expected[i]);
+            const double error = std::fabs(double(from_bf16(got[i])) - expected_out[i]);
             worst_ratio = std::max(worst_ratio,
-                                   error / (1.0e-2 + 0.02 * std::fabs(expected[i])));
+                                   error / (1.0e-2 + 0.02 * std::fabs(expected_out[i])));
             if (error > worst) { worst = error; worst_index = i; }
         }
-        std::cout << "attention sub-block: max|err| " << worst << " at " << worst_index
+        std::cout << "whole layer: max|err| " << worst << " at " << worst_index
                   << " (got " << from_bf16(got[worst_index]) << ", expected "
-                  << expected[worst_index] << ")\n";
+                  << expected_out[worst_index] << ")\n";
         if (worst_ratio > 1.0) {
             std::cerr << "FAIL: tolerance exceeded\n";
             return 1;
         }
-        std::cout << "ok: layer 0 attention matches the reference\n";
+        std::cout << "ok: layer 0 matches the reference\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "FAIL: " << error.what() << "\n";

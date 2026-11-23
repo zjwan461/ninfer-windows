@@ -90,6 +90,43 @@ DSpark taps the hidden state at visits **5, 23, 41, 48** — i.e. end of prelude
 of pass 3, and the final output. `mtp_config.target_layer_ids = [5, 23, 41, 48]` confirms the
 visit numbering used here.
 
+## 3b. The layer pipeline
+
+Read from the reference, because it is not a plain pre-norm block and the executor has to match it
+visit by visit. There are four layer classes, chosen by `(sliding?, inside loop core?)`:
+
+| Layers | Class | Inputs to attention |
+|---|---|---|
+| 0-5, 18-23 sliding | SlidingDecoderLayer | one stream, projected to q, k and v |
+| 5, 11, 17, 23 | FullDecoderLayer | one stream |
+| 6-17 sliding | SlidingLoopDecoderLayer | three streams, each fed by its own message gate |
+| 6-17 global | FullLoopDecoderLayer | three streams |
+
+Per visit, with `h` the incoming hidden state and `B` the block-state stack:
+
+```
+boundary = (layer % 6 == 0)              # is_block_boundary
+attn_in  = layer > 0 ? atend(learned_query, [B, h]) : h     # block attention residual
+attn_out = attn(ln_attn(attn_in))
+attn_out = sconv_attn(attn_out)                              # conv_idx 2
+residual = boundary ? attn_out : h + attn_out                # a boundary starts a new block
+mlp_in   = atend(learned_query_mlp, [B, residual])
+mlp_out  = moe(ln_mlp(mlp_in))
+mlp_out  = sconv_mlp(mlp_out)                                # conv_idx 3
+h_out    = residual + mlp_out
+if boundary: B = cat(B, h)                                   # the pre-layer state joins the stack
+```
+
+`atend` is the block attention residual: one learned query per layer (fp32 `[hidden]`, or `[3,
+hidden]` for the loop-layer classes) attending non-causally over the normalized stack
+`[B, partial]` with scale `1/sqrt(hidden)`. That is what `attn_res.attn_queries.*` are, and why
+four of them carry three rows.
+
+Consequences the executor cannot abstract away: the residual chain **restarts** at every sixth
+layer instead of accumulating; `block_states` grows by one entry per block; and inside the core,
+q, k, v and the MLP input are four separate streams, each read from the previous pass by
+`message_input` and blended by its own `message_merge` before the norm.
+
 ## 4. Attention
 
 Per layer, from the checkpoint's tensor names:

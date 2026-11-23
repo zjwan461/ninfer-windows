@@ -56,9 +56,15 @@ architecture lands as an additive module (see §11).
   ```
 
   Checkpoint tensors: `layers.{6..17}.controllers.{attn,k,v,mlp}.{down,forget,gain}_weight`
-  (48 controllers, 144 tensors), plus the learned read queries
-  `middle_cycle_cross_pass_queries`, `middle_cycle_cross_pass_kv_queries` and the per-layer
-  `attn_res.{attn,mlp}_queries.{0..23}`, `attn_res.output_query`.
+  (48 controllers, 144 tensors). The merge is computed in FP32 end to end: both RMS norms, the
+  rank-64 down projection's consumers, and the two `tanh` gates.
+
+  The message itself is read by attention, not by a dot product: `middle_cycle_cross_pass_queries`
+  and `middle_cycle_cross_pass_kv_queries` are the learned queries of the four sublayer inputs
+  (12 core layers x 2 each, stacked as `[24, 2304]`), attending non-causally with scale
+  `1/sqrt(hidden)` over the previous pass's block states plus the running partial state. The
+  per-layer `attn_res.{attn,mlp}_queries.{0..23}` are the block-residual reads, which is why four
+  of them carry three rows instead of one.
 - **Each pass owns its KV cache and its conv state.** The model has 24 layers but 48 KV caches and
   48 conv-state caches. This is the single most expensive consequence of the loop and it is the
   reason the cache manager has to key on *visit index*, not layer index.
@@ -96,9 +102,28 @@ Per layer, from the checkpoint's tensor names:
 | `log_scaling_floor = 8192`, `alpha = 0.1` | log-scaled attention on the global layers |
 | `final_logit_softcapping = 30.0` | logit soft cap at the head |
 
-**Unverified**: the exact u/d factorisation (whether `wq_du` maps d→u or u→d, and how `d_rel`
-enters `wr_du`/`rel_logits_proj`). Settle against `transformers`' `inkling2_loop` modelling code
-before writing the kernel; do not infer it from shapes alone.
+The reference implementation settles the mathematics (read from `transformers` 5.24,
+`modeling_inkling2_loop.py`), so the kernels do not have to guess:
+
+```
+q = Wq x                                                # [heads, 128]
+q *= scale_q[heads, 128]                                # fp32 learned per-element scale
+q *= clamp(qk_clip / (||q|| + 1e-6), max = 1)           # L2 clip, per head
+q *= tau(pos)   (global layers only)                    # tau = 1 + alpha * ln(max((pos+1)/floor, 1))
+
+k = Wk x -> short conv (kernel 4) -> per head -> same L2 clip (no learned scale)
+v = Wv x -> short conv (kernel 4) -> per head -> unweighted RMS norm (eps, no gamma)
+
+rel = Wrel x -> [heads, 16] -> * scale_rel[heads, 16] -> L2 clip(rel_clip) -> * tau(pos)
+bias[head, i, j] = dot(rel[head, i], proj[:, pos_i - pos_j])   for 0 <= distance < 1024, else 0
+sink[head] = attn_sink_proj x                                  # one extra logit, value zero
+out = softmax([q k^T / sqrt(128) + bias + mask, sink])[..., :-1] @ V
+out = (out * sigmoid(Wgate x)) @ Wo                            # gate computed in fp32
+```
+
+`wr_du` therefore produces the per-head relative state (`heads * d_rel` rows), `rel_logits_proj`
+is the `[16, 1024]` bank of bias-versus-distance profiles, and the two clip scales are the learned
+per-head multipliers applied before the clip.
 
 `attn_res` block residuals (`n_layers_per_attn_res_block = 6`,
 `attn_res_normalize_values = true`) run once per group of six layers, so one core pass produces

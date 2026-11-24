@@ -422,6 +422,28 @@ Which means the next lever is the operations rather than the copies: 681 `linear
 of them per visit being the query, key and value projections from one input, and two more being the
 sink and gate projections from another.
 
+## 8g9. Where the operation budget ended up
+
+Measured through this round of work, with the oracle at 5 of 5 after every step:
+
+| quantity | start | now |
+|---|---:|---:|
+| kernels per token | 1531 | **622** |
+| linear | 681 | 426 |
+| routed expert calls | 816 | 162 |
+| device copies | 997 | 845 |
+| KV store calls | 771 | 51 |
+| decode rate (graph, same load) | 26.5 | 32.3 - 32.8 tok/s |
+
+The largest single reductions were the eight-expert fusions - gate/up with its activation in one launch,
+then the down stage summed by one warp per output row walking the slots in order, which is bit-identical
+to the eight launches it replaced - and the KV store, which was sixteen 256-byte copies a visit.
+
+What remains is 426 line projections and 845 copies. The copies are now more numerous than the kernels,
+and most of them are genuine: four attention streams that are fed from one buffer and then written by
+their own controllers, and convolution states that are swapped rather than aliased. Removing those means
+changing the data flow, not deleting a call.
+
 ## 8g7. The copies, which were never counted
 
 A step issues 1531 kernels and **997 device copies**. Each copy is a driver call of a few hundred

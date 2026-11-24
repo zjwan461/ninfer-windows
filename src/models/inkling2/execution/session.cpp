@@ -372,6 +372,10 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
         throw std::out_of_range("inkling2 session: context exhausted");
     }
 
+    // The position is the same for every visit of a step, so it is uploaded once here rather than
+    // forty-eight times inside the visit.
+    copy_counted(s.position, &position_now, sizeof(std::int32_t), cudaMemcpyHostToDevice, stream);
+
     // The ops take their outputs by non-const reference, so the view has to outlive the call:
     // this holds it for the duration of the full expression.
     struct View {
@@ -532,8 +536,6 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
 
         // ---- query, key and value --------------------------------------------------------
         Tensor position_t(s.position, DType::I32, {1});
-        copy_counted(s.position, &position_now, sizeof(std::int32_t), cudaMemcpyHostToDevice,
-                        stream);
         ScaledL2ClipArgs q_args;
         q_args.rows = 1; q_args.heads = kHeads; q_args.head_dim = kHeadDim;
         q_args.threshold = kQkThreshold;

@@ -1,0 +1,192 @@
+[
+ {
+  "text": "hello world",
+  "chunks": [
+   "hello",
+   " world"
+  ]
+ },
+ {
+  "text": "Hello World",
+  "chunks": [
+   "Hello",
+   " World"
+  ]
+ },
+ {
+  "text": "  leading spaces",
+  "chunks": [
+   " ",
+   " leading",
+   " spaces"
+  ]
+ },
+ {
+  "text": "trailing   ",
+  "chunks": [
+   "trailing",
+   "   "
+  ]
+ },
+ {
+  "text": "don't stop",
+  "chunks": [
+   "don't",
+   " stop"
+  ]
+ },
+ {
+  "text": "I'll've",
+  "chunks": [
+   "I'll",
+   "'ve"
+  ]
+ },
+ {
+  "text": "MACD2000",
+  "chunks": [
+   "MACD",
+   "200",
+   "0"
+  ]
+ },
+ {
+  "text": "2024",
+  "chunks": [
+   "202",
+   "4"
+  ]
+ },
+ {
+  "text": "1234567",
+  "chunks": [
+   "123",
+   "456",
+   "7"
+  ]
+ },
+ {
+  "text": "a1b2",
+  "chunks": [
+   "a",
+   "1",
+   "b",
+   "2"
+  ]
+ },
+ {
+  "text": "中文分词器测试",
+  "chunks": [
+   "中文分词器测试"
+  ]
+ },
+ {
+  "text": "Приве́т мир",
+  "chunks": [
+   "Приве́т",
+   " мир"
+  ]
+ },
+ {
+  "text": "مرحبا بالعالم",
+  "chunks": [
+   "مرحبا",
+   " بالعالم"
+  ]
+ },
+ {
+  "text": "日本語のテキスト",
+  "chunks": [
+   "日本語のテキスト"
+  ]
+ },
+ {
+  "text": "code: x = 1;",
+  "chunks": [
+   "code",
+   ":",
+   " x",
+   " =",
+   " ",
+   "1",
+   ";"
+  ]
+ },
+ {
+  "text": "line\nbreak\r\nwindows",
+  "chunks": [
+   "line",
+   "\n",
+   "break",
+   "\r\n",
+   "windows"
+  ]
+ },
+ {
+  "text": "\n\n\n",
+  "chunks": [
+   "\n\n\n"
+  ]
+ },
+ {
+  "text": "   \t  ",
+  "chunks": [
+   "   \t  "
+  ]
+ },
+ {
+  "text": "MiXeD CaSe wOrDs",
+  "chunks": [
+   "Mi",
+   "Xe",
+   "D",
+   " Ca",
+   "Se",
+   " w",
+   "Or",
+   "Ds"
+  ]
+ },
+ {
+  "text": "URL https://example.com/path/",
+  "chunks": [
+   "URL",
+   " https",
+   "://",
+   "example",
+   ".com",
+   "/path",
+   "/"
+  ]
+ },
+ {
+  "text": "ünïcödé",
+  "chunks": [
+   "ünïcödé"
+  ]
+ },
+ {
+  "text": "é combining",
+  "chunks": [
+   "é",
+   " combining"
+  ]
+ },
+ {
+  "text": "🇨🇳 emoji",
+  "chunks": [
+   "🇨🇳",
+   " emoji"
+  ]
+ },
+ {
+  "text": "  ",
+  "chunks": [
+   "  "
+  ]
+ },
+ {
+  "text": "",
+  "chunks": []
+ }
+]

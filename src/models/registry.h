@@ -4,7 +4,7 @@
 
 namespace ninfer::models {
 
-enum class Architecture { Qwen3_5, Qwen3_5Moe };
+enum class Architecture { Qwen3_5, Qwen3_5Moe, Inkling2 };
 
 [[nodiscard]] Architecture resolve_architecture(std::string_view architecture,
                                                 std::string_view model_type);

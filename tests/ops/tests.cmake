@@ -24,7 +24,20 @@ set(ninfer_op_tests
   scatter
   scatter_bf16_batch
   target_logprobs
-  position)
+  position
+  relbias_attention
+  scaled_l2_clip
+  causal_dconv_residual
+  dynamic_short_conv
+  head_rmsnorm
+  softcapped_swiglu
+  moe_router
+  message_merge
+  block_residual_read)
+ninfer_add_op_test(ninfer_bf16_generic_linear_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_bf16_generic_linear.cpp"
+  LIBRARIES ninfer_ops)
+
 foreach(op IN LISTS ninfer_op_tests)
   ninfer_add_op_test(ninfer_${op}_test
     SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_${op}.cpp"
@@ -172,3 +185,8 @@ set_target_properties(ninfer_test_e8_codec PROPERTIES CUDA_ARCHITECTURES "89")
 # the shipped codec. ninfer_e8_root_codec_test above drives the production header.
 add_test(NAME ninfer_test_e8_codec COMMAND ninfer_test_e8_codec)
 set_tests_properties(ninfer_test_e8_codec PROPERTIES SKIP_RETURN_CODE 77)
+
+ninfer_add_test(ninfer_ops_launch_overhead_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_launch_overhead.cu"
+  LIBRARIES ninfer_ops cudart)
+set_tests_properties(ninfer_ops_launch_overhead_test PROPERTIES SKIP_RETURN_CODE 77)

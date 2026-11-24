@@ -9,6 +9,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include "ops/op_counters.h"
 
 namespace ninfer::ops {
 namespace {
@@ -90,6 +91,7 @@ void rmsnorm_impl(const Tensor& x, const Tensor& weight, float eps, bool unit_of
 
 void rmsnorm(const Tensor& x, const Tensor& weight, float eps, bool unit_offset, Tensor& out,
              cudaStream_t stream) {
+    ninfer::ops::op_counters().norm.fetch_add(1, std::memory_order_relaxed);
     rmsnorm_impl(x, weight, eps, unit_offset, nullptr, out, stream);
 }
 

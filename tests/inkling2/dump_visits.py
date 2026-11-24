@@ -1,0 +1,123 @@
+"""Dump the 48 layer-visit hidden states of Inkling 2 Mini through the reference implementation.
+
+The reference is `transformers`' own `Inkling2LoopForConditionalGeneration`, not NInfer, and the
+weights come from `materialize_bf16.py` -- so the numbers this produces are the checkpoint's
+mathematics, which is what the NInfer kernels are measured against.
+
+    python tests/inkling2/dump_visits.py --model /path/to/inkling2-bf16 --out oracle.npz
+"""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+import numpy as np
+import torch
+from transformers import AutoModelForMultimodalLM, AutoTokenizer
+
+LAYER_COUNT = 24
+VISITS = 48
+
+
+def find_text_stack(model) -> torch.nn.ModuleList:
+    """The text decoder is the only 24-layer ModuleList in the model."""
+    for name, module in model.named_modules():
+        stack = getattr(module, "layers", None)
+        if isinstance(stack, torch.nn.ModuleList) and len(stack) == LAYER_COUNT:
+            print(f"text stack: {name} ({type(module).__name__})")
+            return stack
+    raise SystemExit("no 24-layer text stack found")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--model", type=Path, required=True, help="BF16 reference checkpoint")
+    parser.add_argument("--out", type=Path, required=True, help=".npz with the 48 visits")
+    parser.add_argument("--prompt", default="The capital of France is")
+    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--raw", type=Path, default=None,
+                        help="also write visit_in_<i>.bin / visit_out_<i>.bin as float32")
+    parser.add_argument("--token-id", type=int, default=None,
+                        help="bypass the tokenizer and feed exactly this one token")
+    args = parser.parse_args()
+
+    model = AutoModelForMultimodalLM.from_pretrained(
+        args.model, dtype=torch.bfloat16, device_map=args.device, low_cpu_mem_usage=True
+    ).eval()
+    print(f"vram {torch.cuda.memory_allocated() / 2**30:.1f} GiB")
+
+    visits: list[tuple[int, np.ndarray]] = []
+
+    def hook_for(index: int):
+        def hook(module, inputs, output):
+            hidden = output[0] if isinstance(output, tuple) else output
+            visits.append((index, hidden.detach().float().cpu().numpy()))
+        return hook
+
+    inputs_seen: list[np.ndarray] = []
+    routing: list[tuple[np.ndarray, np.ndarray]] = []
+
+    def router_hook(module, args_, output):
+        # (logits, weights, indices): the selection is a discrete function and this model has
+        # near-ties, so the parity test needs to know when the routing itself differed.
+        routing.append((output[2].detach().cpu().numpy()[0].astype(np.int64),
+                        output[1].detach().float().cpu().numpy()[0].astype(np.float32)))
+
+    def input_hook(module, args_):
+        inputs_seen.append(args_[0].detach().float().cpu().numpy())
+
+    handles = [layer.register_forward_hook(hook_for(i))
+               for i, layer in enumerate(find_text_stack(model))]
+    stack = find_text_stack(model)
+    handles += [layer.register_forward_pre_hook(input_hook) for layer in stack]
+    handles += [layer.mlp.gate.register_forward_hook(router_hook) for layer in stack]
+
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    if args.token_id is None:
+        ids = tokenizer(args.prompt, return_tensors="pt").input_ids.to(args.device)
+    else:
+        ids = torch.tensor([[args.token_id]], dtype=torch.long, device=args.device)
+        args.prompt = repr(args.token_id)
+    with torch.no_grad():
+        out = model(input_ids=ids, use_cache=False)
+    for handle in handles:
+        handle.remove()
+
+    if len(visits) != VISITS:
+        raise SystemExit(f"expected {VISITS} layer visits, captured {len(visits)}")
+
+    logits = out.logits[:, -1, :].float().cpu().numpy()
+    top = np.argsort(-logits[0])[:5]
+    print("prompt:", args.prompt)
+    print("top5:", [(tokenizer.decode([int(t)]), round(float(logits[0][t]), 2)) for t in top])
+    for index, (layer, hidden) in enumerate(visits):
+        print(f"  visit {index:2d} layer {layer:2d} std {hidden.std():.5f}")
+
+    if args.raw is not None:
+        args.raw.mkdir(parents=True, exist_ok=True)
+        for index, (_, hidden) in enumerate(visits):
+            np.ascontiguousarray(hidden[0].reshape(-1), dtype=np.float32).tofile(
+                args.raw / f"visit_out_{index}.bin")
+        for index, seen in enumerate(inputs_seen):
+            np.ascontiguousarray(np.reshape(seen[0], -1), dtype=np.float32).tofile(
+                args.raw / f"visit_in_{index}.bin")
+        print("raw buffers in", args.raw)
+
+    if args.raw is not None:
+        for index, (indices, weights) in enumerate(routing):
+            (args.raw / f"route_{index}.txt").write_text(
+                " ".join(str(int(i)) for i in indices) + "\n" +
+                " ".join(f"{w:.8g}" for w in weights) + "\n")
+    np.savez(args.out,
+             hidden=np.stack([v[1][0] for v in visits]),
+             hidden_in=np.stack([np.reshape(i[0], -1) for i in inputs_seen]),
+             layers=np.array([v[0] for v in visits]),
+             logits=logits, ids=ids.cpu().numpy(),
+             route_indices=np.stack([r[0] for r in routing]),
+             route_weights=np.stack([r[1] for r in routing]))
+    print("saved", args.out)
+
+
+if __name__ == "__main__":
+    main()

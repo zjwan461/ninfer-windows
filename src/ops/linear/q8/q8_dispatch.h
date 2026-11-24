@@ -14,4 +14,7 @@ Q8Launch select_q8_launch(std::int32_t n, std::int32_t k, std::int32_t t, Linear
 void q8_dispatch(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy policy,
                  cudaStream_t stream);
 
+// True when a tuned q8 route exists for this geometry.
+[[nodiscard]] bool has_q8_shape(std::int32_t n, std::int32_t k);
+
 } // namespace ninfer::ops::detail

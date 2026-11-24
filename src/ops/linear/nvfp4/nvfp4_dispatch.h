@@ -20,4 +20,7 @@ namespace ninfer::ops::detail {
 void nvfp4_dispatch(const Tensor& x, const Weight& weight, Tensor& out, LinearPolicy policy,
                     WorkspaceArena* workspace, cudaStream_t stream);
 
+// True when a tuned NVFP4 route exists for this geometry.
+[[nodiscard]] bool has_nvfp4_shape(std::int32_t n, std::int32_t k);
+
 } // namespace ninfer::ops::detail

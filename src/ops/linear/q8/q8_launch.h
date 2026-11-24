@@ -23,4 +23,16 @@ void launch_q8_mma_r128_c80(const Tensor&, const Weight&, Tensor&, cudaStream_t)
 void launch_q8_mma_r64x16_c48_k128_a1(const Tensor&, const Weight&, Tensor&, cudaStream_t);
 void launch_q8_mma_r64x32_c64_k128_a1(const Tensor&, const Weight&, Tensor&, cudaStream_t);
 
+
+// Runtime-extent q8 decode route for shapes without a tuned kernel.
+void launch_q8_gather_gemv(const Tensor& x, const Weight* table, const std::int32_t* slots,
+                           int slot, const Weight& extents, Tensor& out, cudaStream_t stream);
+
+void launch_q8_gather_accumulate(const Tensor& x, const Weight* table, const std::int32_t* slots,
+                                 int slot, const Weight& extents, const float* scales,
+                                 Tensor& acc, cudaStream_t stream);
+
+void launch_q8_generic_gemv(const Tensor& x, const Weight& weight, Tensor& out,
+                            cudaStream_t stream);
+
 } // namespace ninfer::ops::detail

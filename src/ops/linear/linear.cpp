@@ -4,16 +4,22 @@
 #include "ops/linear/bf16/bf16_dispatch.h"
 #include "ops/linear/fp8/fp8_dispatch.h"
 #include "ops/linear/nvfp4/nvfp4_dispatch.h"
+#include "ops/linear/nvfp4/nvfp4_format.h"
+#include "ops/linear/nvfp4/nvfp4_launch.h"
 #include "ops/linear/q4/q4_dispatch.h"
+#include "ops/linear/q4/q4_launch.h"
 #include "ops/linear/q5/q5_dispatch.h"
 #include "ops/linear/q6/q6_dispatch.h"
 #include "ops/linear/q8/q8_dispatch.h"
+#include "ops/linear/q8/q8_launch.h"
 #include "ops/linear/t5/t5_project.h"
 
+#include <atomic>
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include "ops/op_counters.h"
 
 namespace ninfer::ops {
 namespace {
@@ -77,8 +83,14 @@ void validate_linear_semantics(const Tensor& x, const Weight& w, const Tensor& o
 
 void dispatch_linear(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy policy,
                      WorkspaceArena* workspace, cudaStream_t stream) {
+    ninfer::ops::op_counters().linear.fetch_add(1, std::memory_order_relaxed);
     switch (w.qtype) {
     case QType::Q4_G64_FP16:
+        // Shapes the tuned table does not cover still have to run at a single token.
+        if (x.ne[1] == 1 && !detail::has_q4_shape(w.n, w.k)) {
+            detail::launch_q4_generic_gemv(x, w, out, stream);
+            return;
+        }
         detail::q4_dispatch(x, w, out, policy, stream);
         return;
     case QType::Q5_G64_FP16:
@@ -88,12 +100,31 @@ void dispatch_linear(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy
         detail::q6_dispatch(x, w, out, policy, stream);
         return;
     case QType::Q8_G32_FP16:
+        // A shape outside the tuned table still has to run; the generic decode route covers any
+        // extents for a single token.
+        if (x.ne[1] == 1 && !detail::has_q8_shape(w.n, w.k)) {
+            detail::launch_q8_generic_gemv(x, w, out, stream);
+            return;
+        }
         detail::q8_dispatch(x, w, out, policy, stream);
         return;
     case QType::BF16:
+        // A single token is decode: the tile kernel wastes 31 of every 32 threads there, so the
+        // shapes without a tuned route take the warp-per-row GEMV instead.
+        if (x.ne[1] == 1 && !detail::has_bf16_shape(w.n, w.k)) {
+            detail::launch_bf16_generic_gemv(x, w, out, stream);
+            return;
+        }
         detail::bf16_dispatch(x, w, out, policy, stream);
         return;
     case QType::NVFP4:
+        // A shape outside the tuned table still has to run; the generic decode route covers any
+        // extents for a single token.
+        if (x.ne[1] == 1 && !detail::has_nvfp4_shape(w.n, w.k)) {
+            detail::validate_nvfp4_weight(w, "nvfp4 linear");
+            detail::launch_nvfp4_generic_gemv(x, w, out, stream);
+            return;
+        }
         detail::nvfp4_dispatch(x, w, out, policy, workspace, stream);
         return;
     case QType::FP8_E4M3FN_ROW_BF16:

@@ -14,4 +14,7 @@ Bf16Launch select_bf16_launch(std::int32_t n, std::int32_t k, std::int32_t t, Li
 void bf16_dispatch(const Tensor& x, const Weight& weight, Tensor& out, LinearPolicy policy,
                    cudaStream_t stream);
 
+// True when a tuned BF16 route exists for this geometry.
+[[nodiscard]] bool has_bf16_shape(std::int32_t n, std::int32_t k);
+
 } // namespace ninfer::ops::detail

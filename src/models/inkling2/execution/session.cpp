@@ -672,6 +672,10 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
                          {kExperts, 1});
         Tensor router_out(s.indices, DType::I32, {kTopK, 1});
         Tensor router_weights(s.router_weights, DType::FP32, {kTopK, 1});
+        // The device path is the default now that it reproduces the oracle; the host path stays for
+        // comparison and for anything that wants to see the selection without a hook.
+        static const bool device_experts =
+            std::getenv("NINFER_INKLING2_HOST_EXPERTS") == nullptr;
         moe_router(vec(s.mlp_in, kHidden), gate_matrix, gate_bias, kTopK, 8.0F, router_out,
                    router_weights, stream);
         // The selection picks weight slots on the host, so this is the one readback a step keeps.
@@ -688,13 +692,17 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
         // selection. It is a probe, not a mode: it changes what the model computes, and exists so
         // that "how much does the readback cost" can be answered by measurement instead of by
         // argument.
-        static const bool skip_readback = std::getenv("NINFER_INKLING2_NO_ROUTING_READBACK") != nullptr;
-        if (!skip_readback) { check(cudaStreamSynchronize(stream), "routing wait"); }
+        // In production nothing on the host needs to know the selection, so the drain is skipped
+        // entirely; a hook (the parity harness) is the only thing that does.
+        static const bool skip_readback =
+            std::getenv("NINFER_INKLING2_NO_ROUTING_READBACK") != nullptr;
+        const bool want_host_view = routing_hook != nullptr || !device_experts;
+        if (want_host_view && !skip_readback) { check(cudaStreamSynchronize(stream), "routing wait"); }
         static std::vector<std::int32_t> probe_indices(static_cast<std::size_t>(kTopK), 0);
         static std::vector<float> probe_routing(static_cast<std::size_t>(kTopK), 1.0F);
         std::vector<std::int32_t> indices(static_cast<std::size_t>(kTopK));
         std::vector<float> routing(static_cast<std::size_t>(kTopK));
-        if (skip_readback) {
+        if (!want_host_view || skip_readback) {
             indices = probe_indices;
             routing = probe_routing;
         } else {
@@ -723,8 +731,6 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
         // `NINFER_INKLING2_DEVICE_EXPERTS=1` takes the selection off the host entirely: both gather
         // routes read the weight and the slot from device memory. Off by default while it is being
         // proven, so the two paths can be compared on the same run.
-        static const bool device_experts =
-            std::getenv("NINFER_INKLING2_DEVICE_EXPERTS") != nullptr;
         const auto* expert_slots = static_cast<const std::int32_t*>(s.indices);
         const auto* routing_scales = static_cast<const float*>(s.router_weights);
         const auto* w13_table =

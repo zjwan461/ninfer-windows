@@ -488,6 +488,30 @@ Which is to say: the countable part of the objective is done, and the part that 
 measurement on hardware this machine is not. That distinction belongs in the record rather than in a
 claim that the goal is finished.
 
+## 8g21. The answer, and it explains the failed aliasing
+
+Same probe, extended to print the key buffer at the end of the visit as well as the start:
+
+    probe full layer 5 (visit 5): k_in0=48792  attn0=48771  h_in0=49170
+    probe end layer 5:            k_in0=48792
+    probe full layer 5 (visit 5): k_in0=48975  attn0=48992  h_in0=49303
+    probe end layer 5:            k_in0=48975
+
+Unchanged. **Nothing writes the key buffer during a full-layer visit.** So on those visits the key and
+value bases point at buffers that this visit never filled - they hold whatever an earlier visit left - and
+the model still matches the reference.
+
+That is why the aliasing broke it: replacing the bases with a view of the hidden state feeds the norms
+*this* visit's attention input instead of the leftover, and something downstream depends on the difference.
+It also means the copy that was removed was not a copy of anything this visit computed.
+
+Which raises a question that matters more than the copy: is that leftover correct by construction, or does
+the oracle pass because the values happen to be equivalent? The probe shows the two are numerically
+different (48792 against 48992 at the same visit), so it is not equivalence - something still reads the
+leftover deliberately, and the next thing to trace is what consumes `k_base` on a full layer.
+
+Until that is answered, that copy stays.
+
 ## 8g20. That hypothesis, refuted by the probe
 
 `NINFER_INKLING2_PROBE_KIN=1` prints, on each full layer of the first pass, the key base and the first

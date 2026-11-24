@@ -892,6 +892,13 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
         }
         if (stage_sink) { stage_sink(layer_index, "mlp", s.mlp_conv, kHidden); }
         residual_store_bf16(vec(s.h, kHidden), residual, vec(s.mlp_conv, kHidden), stream);
+        if (std::getenv("NINFER_INKLING2_PROBE_KIN") != nullptr && !sliding && slot < 24) {
+            // Compare with the value printed at the top of this visit: did anything write the key
+            // buffer that the bases pointed at, or is it carrying an earlier visit's contents?
+            std::uint16_t k_in_end = 0;
+            check(cudaMemcpy(&k_in_end, s.k_in, 2, cudaMemcpyDeviceToHost), "probe k_in end");
+            std::printf("probe end layer %d: k_in0=%u\n", layer_index, k_in_end);
+        }
         if (probe_h_in) {
             std::vector<std::uint16_t> h_in_after(static_cast<std::size_t>(kHidden));
             check(cudaMemcpy(h_in_after.data(), s.h_in, std::size_t(kHidden) * 2,

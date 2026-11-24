@@ -406,6 +406,22 @@ That reorders the next steps. Fewer launches would save the 6 ms a token of laun
 wasted bandwidth is the larger number and it comes from the access pattern rather than the count, so
 coalescing the code-plane read comes first.
 
+## 8g8. Which copies are actually removable
+
+The rule from §8g7 needs a second half, and one experiment supplied it. Aliasing `attn_in`, `q_in`,
+`k_in` and `v_in` onto whichever buffer the read wrote into removed sixty-eight copies and broke the
+oracle: those four are fed from one source and then **written** by their own controllers, so the copies
+were isolation, not decoration. Reverted.
+
+So the rule is: remove a copy only when the destination is written once and read thereafter. Checking
+that for the hidden-sized sites leaves few - `h` is written three times a visit, so its snapshot into
+`h_in` is honest, and the rest are the same shape. The 895 that remain are near the floor for this
+structure.
+
+Which means the next lever is the operations rather than the copies: 681 `linear` calls a token, three
+of them per visit being the query, key and value projections from one input, and two more being the
+sink and gate projections from another.
+
 ## 8g7. The copies, which were never counted
 
 A step issues 1531 kernels and **997 device copies**. Each copy is a driver call of a few hundred

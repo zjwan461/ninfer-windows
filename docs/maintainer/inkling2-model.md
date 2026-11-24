@@ -488,6 +488,26 @@ Which is to say: the countable part of the objective is done, and the part that 
 measurement on hardware this machine is not. That distinction belongs in the record rather than in a
 claim that the goal is finished.
 
+## 8g19. Where the aliasing failure probably lives
+
+Reading the order of operations rather than guessing at it:
+
+    void* k_base = queries == 3 ? s.k_in : s.attn_in;    // chosen BEFORE the message block
+    void* v_base = queries == 3 ? s.v_in : s.attn_in;
+    if (uses_messages) { ... fills the four controller inputs ... }
+
+So the key and value bases are chosen before the block that fills the controller inputs. On the no-message
+path nothing fills k_in or v_in at all in the original code either, which means for a full layer the bases
+point at whatever those buffers held from an earlier visit. That is worth checking on its own - it may be
+harmless because the sliding layers are the ones with queries == 1 and the full layers are visited in an
+order that happens to leave the right values, which would be exactly the kind of load-bearing accident
+that breaks when a copy is removed.
+
+The alias attempt changed the else branch to `attn_states = h_in` and left `k_base` pointing at
+`queries == 3 ? s.k_in : attn_states`, so the full-layer case still read the un-filled buffers. That is a
+consistent explanation for a wrong-buffer failure rather than a rounding one, and it is checkable: print
+k_base and the first value of k_in on a full layer of pass 0.
+
 ## 8g18. What the graph capture is worth, measured
 
 Same binary, same quiet machine, sixty-four steps:

@@ -444,6 +444,15 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
         Tensor state_kv(s.state_scratch, DType::BF16, {kKv, kConvState});
         Tensor state_hidden(s.state_scratch, DType::BF16, {kHidden, kConvState});
         copy_counted(s.h_in, s.h, kHidden * 2, cudaMemcpyDeviceToDevice, stream);
+        // Probe: does anything write the hidden state during a visit? One host copy at each end of the
+        // visit answers it, and the answer decides whether the attention input can be a view of it.
+        static const bool probe_h_in = std::getenv("NINFER_INKLING2_PROBE_H_IN") != nullptr;
+        std::vector<std::uint16_t> h_in_before;
+        if (probe_h_in) {
+            h_in_before.resize(static_cast<std::size_t>(kHidden));
+            check(cudaMemcpy(h_in_before.data(), s.h_in, std::size_t(kHidden) * 2,
+                             cudaMemcpyDeviceToHost), "probe h_in before");
+        }
         if (stage_sink && boundary) {
             stage_sink(layer_index, "boundary_in", s.h_in, kHidden);
         }
@@ -869,6 +878,19 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
         }
         if (stage_sink) { stage_sink(layer_index, "mlp", s.mlp_conv, kHidden); }
         residual_store_bf16(vec(s.h, kHidden), residual, vec(s.mlp_conv, kHidden), stream);
+        if (probe_h_in) {
+            std::vector<std::uint16_t> h_in_after(static_cast<std::size_t>(kHidden));
+            check(cudaMemcpy(h_in_after.data(), s.h_in, std::size_t(kHidden) * 2,
+                             cudaMemcpyDeviceToHost), "probe h_in after");
+            std::size_t first_difference = kHidden;
+            for (std::size_t i = 0; i < h_in_after.size(); ++i) {
+                if (h_in_after[i] != h_in_before[i]) { first_difference = i; break; }
+            }
+            if (first_difference != kHidden) {
+                std::printf("probe: visit %d changed h_in at %zu (h_in=%p attn_in=%p q_in=%p)\n",
+                            slot, first_difference, s.h_in, s.attn_in, s.q_in);
+            }
+        }
         if (stage_sink) { stage_sink(layer_index, "out", s.h, kHidden); }
         (void)stack_limit;
     };

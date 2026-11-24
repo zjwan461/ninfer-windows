@@ -245,6 +245,25 @@ of NVFP4 for the loop core's twelve layers and 5.38 GiB of q8 for the coda's fou
 A Q3 format would go further, but it means a codec, a kernel and their tests; the numbers above
 say it is not needed for the 16 GB target, so it stays unbuilt.
 
+## 8j. Device-side expert selection, concretely
+
+What has to change for capture to be possible, in the order it has to be built:
+
+1. **A device-side table per layer.** `Weight` is a flat POD of about a hundred bytes, so the whole
+   set - 128 experts times two matrices - can be uploaded once at session init and indexed on the
+   device. The session keeps the table pointer instead of 256 host-side handles.
+2. **A gather route beside the existing one.** The 2304x2304 NVFP4 decode kernel already takes the
+   unpacked pointers; the gather variant takes the table and a slot index and reads them there. One
+   kernel per stored format this path uses (NVFP4 and q4), because the table entry carries the type.
+3. **A scaled accumulate that reads its scale from the device.** The router weights already live in
+   `s.router_weights`, so the eight accumulating adds take a slot index rather than a float.
+4. **Then capture.** With 1-3 in place nothing inside a step depends on the host, the readbacks stop
+   being needed at all - not made faster, made unnecessary - and `--graph` loses its probe
+   dependency.
+
+The measurement that justifies the order is in §8i: capture is worth forty percent, and it cannot be
+taken until these exist.
+
 ## 8i. The answer is in the Qwen 3.8 path
 
 The Qwen 3.8 decode does not call operations one after another the way this port does. It captures

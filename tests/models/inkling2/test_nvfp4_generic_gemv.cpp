@@ -12,6 +12,7 @@
 #include "models/inkling2/materialize.h"
 #include "models/inkling2/parameters.h"
 #include "ninfer/ops/linear.h"
+#include "ops/linear/nvfp4/nvfp4_launch.h"
 
 #include <cuda_runtime.h>
 
@@ -125,6 +126,38 @@ int main(int argc, char** argv) {
             std::vector<std::uint16_t> got(2304);
             cudaMemcpy(got.data(), d_out, got.size() * 2, cudaMemcpyDeviceToHost);
             cudaFree(d_out);
+
+            // The gather route reads the same weight from a device table by slot; it must produce
+            // the same bits, because the indirection is the only thing that differs.
+            {
+                void* table = nullptr;
+                cudaMalloc(&table, sizeof(Weight));
+                cudaMemcpy(table, &weight, sizeof(Weight), cudaMemcpyHostToDevice);
+                void* d_gathered = nullptr;
+                cudaMalloc(&d_gathered, got.size() * 2);
+                ninfer::Tensor t_gathered(d_gathered, ninfer::DType::BF16, {2304, 1});
+                ninfer::ops::detail::launch_nvfp4_gather_gemv(t_x, static_cast<const Weight*>(table),
+                                                              0, t_gathered, nullptr);
+                if (cudaDeviceSynchronize() != cudaSuccess) {
+                    std::cerr << "FAIL: gather route: " << cudaGetErrorString(cudaGetLastError())
+                              << "\n";
+                    return 1;
+                }
+                std::vector<std::uint16_t> gathered(got.size());
+                cudaMemcpy(gathered.data(), d_gathered, gathered.size() * 2,
+                           cudaMemcpyDeviceToHost);
+                if (gathered != got) {
+                    std::size_t differing = 0;
+                    for (std::size_t i = 0; i < got.size(); ++i) {
+                        if (gathered[i] != got[i]) { ++differing; }
+                    }
+                    std::cerr << "FAIL: gather route differs from the direct route in " << differing
+                              << " of " << got.size() << " values\n";
+                    return 1;
+                }
+                cudaFree(d_gathered);
+                cudaFree(table);
+            }
 
             double local = 0.0;
             for (std::size_t i = 0; i < got.size(); ++i) {

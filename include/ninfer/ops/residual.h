@@ -22,4 +22,9 @@ void residual_store_bf16(Tensor& out, const Tensor& base, const Tensor& addend, 
 // device instead of round-tripping through the host once per expert.
 void axpy_bf16_into_f32(Tensor& acc, const Tensor& x, float scale, cudaStream_t stream);
 
+// The same accumulation whose coefficient is read from `scales[slot]` on the device, for callers
+// that must not learn the coefficient on the host.
+void axpy_bf16_into_f32_device_scale(Tensor& acc, const Tensor& x, const float* scales, int slot,
+                                     cudaStream_t stream);
+
 } // namespace ninfer::ops

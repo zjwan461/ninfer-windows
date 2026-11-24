@@ -43,6 +43,16 @@ __global__ void axpy_bf16_into_f32_kernel(float* __restrict__ acc,
     if (index < count) { acc[index] += scale * __bfloat162float(x[index]); }
 }
 
+// The same accumulation with the coefficient read from device memory, so a captured graph can pick
+// an expert's router weight without the host knowing which expert was chosen.
+__global__ void axpy_bf16_into_f32_device_kernel(float* __restrict__ acc,
+                                                 const __nv_bfloat16* __restrict__ x,
+                                                 const float* __restrict__ scales, int slot,
+                                                 std::int64_t count) {
+    const std::int64_t index = std::int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (index < count) { acc[index] += scales[slot] * __bfloat162float(x[index]); }
+}
+
 unsigned blocks(std::int64_t count) { return static_cast<unsigned>((count + 255) / 256); }
 
 } // namespace
@@ -77,6 +87,15 @@ void residual_store_bf16_launch(Tensor& out, const Tensor& base, const Tensor& a
     residual_store_bf16_kernel<<<blocks(count), 256, 0, stream>>>(
         static_cast<const float*>(base.data), static_cast<const __nv_bfloat16*>(addend.data),
         static_cast<__nv_bfloat16*>(out.data), count);
+}
+
+void axpy_bf16_into_f32_device_launch(Tensor& acc, const Tensor& x, const float* scales, int slot,
+                                      cudaStream_t stream) {
+    const std::int64_t count = acc.numel();
+    if (count <= 0) { return; }
+    axpy_bf16_into_f32_device_kernel<<<blocks(count), 256, 0, stream>>>(
+        static_cast<float*>(acc.data), static_cast<const __nv_bfloat16*>(x.data), scales, slot,
+        count);
 }
 
 void axpy_bf16_into_f32_launch(Tensor& acc, const Tensor& x, float scale, cudaStream_t stream) {

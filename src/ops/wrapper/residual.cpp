@@ -57,6 +57,14 @@ void residual_store_bf16(Tensor& out, const Tensor& base, const Tensor& addend,
     detail::residual_store_bf16_launch(out, base, addend, stream);
 }
 
+void axpy_bf16_into_f32_device_scale(Tensor& acc, const Tensor& x, const float* scales, int slot,
+                                     cudaStream_t stream) {
+    if (scales == nullptr) { throw std::invalid_argument("axpy: scales must be non-null"); }
+    if (slot < 0) { throw std::invalid_argument("axpy: slot must be non-negative"); }
+    if (acc.numel() != x.numel()) { throw std::invalid_argument("axpy: acc and x must match"); }
+    detail::axpy_bf16_into_f32_device_launch(acc, x, scales, slot, stream);
+}
+
 void axpy_bf16_into_f32(Tensor& acc, const Tensor& x, float scale, cudaStream_t stream) {
     require(acc, DType::FP32, "acc");
     require(x, DType::BF16, "x");

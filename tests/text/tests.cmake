@@ -10,3 +10,8 @@ ninfer_add_test(ninfer_text_llama3_split_test
 ninfer_add_test(ninfer_text_byte_unicode_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_byte_unicode.cpp"
   LIBRARIES ninfer_text)
+
+ninfer_add_test(ninfer_text_byte_bpe_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_byte_bpe.cpp"
+  LIBRARIES ninfer_text)
+set_tests_properties(ninfer_text_byte_bpe_test PROPERTIES SKIP_RETURN_CODE 77)

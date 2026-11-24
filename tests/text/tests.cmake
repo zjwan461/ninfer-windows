@@ -14,4 +14,8 @@ ninfer_add_test(ninfer_text_byte_unicode_test
 ninfer_add_test(ninfer_text_byte_bpe_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_byte_bpe.cpp"
   LIBRARIES ninfer_text)
-set_tests_properties(ninfer_text_byte_bpe_test PROPERTIES SKIP_RETURN_CODE 77)
+# The test reads its fixture and the tokenizer by relative path, so it needs to start from the source
+# tree rather than from the build directory ctest would otherwise use.
+set_tests_properties(ninfer_text_byte_bpe_test PROPERTIES
+  SKIP_RETURN_CODE 77
+  WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")

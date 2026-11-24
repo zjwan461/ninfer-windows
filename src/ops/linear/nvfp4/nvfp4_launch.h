@@ -28,6 +28,10 @@ void launch_nvfp4_gather_swiglu_all(const Tensor& x, const Weight* table,
                                     float gate_cap, float up_cap, Tensor& out,
                                     cudaStream_t stream);
 
+void launch_nvfp4_gather_down_all(const Tensor& acts, const Weight* table,
+                                 const std::int32_t* slots, int top_k, const Weight& extents,
+                                 const float* scales, Tensor& acc, cudaStream_t stream);
+
 void launch_nvfp4_generic_gemv(const Tensor& x, const Weight& weight, Tensor& out,
                                cudaStream_t stream);
 

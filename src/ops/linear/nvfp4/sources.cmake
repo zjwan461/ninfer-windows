@@ -11,6 +11,7 @@ target_sources(ninfer_ops PRIVATE
   "${CMAKE_CURRENT_LIST_DIR}/generic_gemv.cu"
   "${CMAKE_CURRENT_LIST_DIR}/gather_swiglu.cu"
   "${CMAKE_CURRENT_LIST_DIR}/gather_swiglu_all.cu"
+  "${CMAKE_CURRENT_LIST_DIR}/gather_down_all.cu"
 )
 
 # Fork-local: the non-RDC NVFP4 archive exists only for sm_120a.

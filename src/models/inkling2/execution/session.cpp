@@ -787,6 +787,16 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
                 vec(s.mlp_in, kHidden), w13_table, expert_slots, kTopK, w13_extents, 4.0F, 25.0F,
                 vec(s.expert_act, kTopK * kInter), stream);
         }
+        if (device_experts && nvfp4_experts && !skip_experts) {
+            // The down stage for all eight experts at once: a warp owns one output row and walks the
+            // slots in order, so the sum is the same one the eight launches produced.
+            ops::detail::launch_nvfp4_gather_down_all(
+                vec(s.expert_act, kTopK * kInter), w2_table, expert_slots, kTopK, w2_extents,
+                routing_scales, accumulator, stream);
+            cast_f32_to_bf16(vec(s.down, kHidden), accumulator, stream);
+            if (stage_sink) { stage_sink(layer_index, "mlp_pre", s.down, kHidden); }
+            goto moe_done;
+        }
         for (int j = 0; j < kTopK && !skip_experts; ++j) {
             if (device_experts) {
                 void* act_j = static_cast<char*>(s.expert_act) +
@@ -824,6 +834,7 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
         }
         cast_f32_to_bf16(vec(s.down, kHidden), accumulator, stream);
         if (stage_sink) { stage_sink(layer_index, "mlp_pre", s.down, kHidden); }
+    moe_done:;
 
         {
             char* state = static_cast<char*>(s.mlp_state) + std::size_t(slot) * kHidden * kConvState * 2;

@@ -8,6 +8,8 @@
 #include "ninfer/ops/argmax.h"
 #include "text/byte_bpe.h"
 #include "ops/op_counters.h"
+#include "models/inkling2/execution/weight_table.h"
+#include "ops/linear/nvfp4/nvfp4_launch.h"
 
 #include <cstdlib>
 #include <chrono>
@@ -47,6 +49,7 @@ int main(int argc, char** argv) {
         std::vector<std::uint32_t> prompt_ids;
         int bench_steps = 0;
         int generate_steps = 0;
+        bool bench_gather = false;
         bool capture_graph = false;
         std::string prompt_text;
         std::string tokenizer_path = "/workspaces/models/inkling2/tokenizer.json";
@@ -73,12 +76,13 @@ int main(int argc, char** argv) {
             else if (arg == "--bench" && i + 1 < argc) { bench_steps = std::stoi(argv[++i]); }
             else if (arg == "--generate" && i + 1 < argc) { generate_steps = std::stoi(argv[++i]); }
             else if (arg == "--graph") { capture_graph = true; }
+            else if (arg == "--bench-gather") { bench_gather = true; }
             else if (arg == "--prompt" && i + 1 < argc) { prompt_text = argv[++i]; }
             else if (arg == "--tokenizer" && i + 1 < argc) { tokenizer_path = argv[++i]; }
             else { throw std::invalid_argument("unknown argument " + arg); }
         }
         if (artifact_path.empty() ||
-            (oracle.empty() && bench_steps == 0 && generate_steps == 0)) {
+            (oracle.empty() && bench_steps == 0 && generate_steps == 0 && !bench_gather)) {
             std::cout << "SKIP: supply --artifact and --oracle\n";
             return 77;
         }
@@ -166,6 +170,55 @@ int main(int argc, char** argv) {
             std::cout << "prompt tokens:";
             for (auto id : prompt_ids) { std::cout << " " << id; }
             std::cout << "\n";
+        }
+        if (bench_gather) {
+            // One expert matrix, called many times, so the kernel's own cost can be read against the
+            // bytes it moves instead of being inferred from the whole token.
+            const auto& layer0 = weights.index.layers[0];
+            std::vector<ninfer::Weight> table(static_cast<std::size_t>(128));
+            for (int expert = 0; expert < 128; ++expert) {
+                table[static_cast<std::size_t>(expert)] = models::inkling2::matrix_weight(
+                    weights, layer0.expert_w13[static_cast<std::size_t>(expert)]);
+            }
+            void* device_table = ninfer::models::inkling2::upload_weight_table(table, nullptr);
+            std::vector<std::int32_t> zero(static_cast<std::size_t>(8), 0);
+            void* device_slots = nullptr;
+            cudaMalloc(&device_slots, zero.size() * sizeof(std::int32_t));
+            cudaMemcpy(device_slots, zero.data(), zero.size() * sizeof(std::int32_t),
+                       cudaMemcpyHostToDevice);
+            const auto& extents = table.front();
+            void* input = nullptr;
+            cudaMalloc(&input, static_cast<std::size_t>(extents.k) * 2);
+            cudaMemset(input, 0, static_cast<std::size_t>(extents.k) * 2);
+            void* output = nullptr;
+            cudaMalloc(&output, static_cast<std::size_t>(extents.n) * 2);
+            ninfer::Tensor t_in(input, ninfer::DType::BF16, {extents.k, 1});
+            ninfer::Tensor t_out(output, ninfer::DType::BF16, {extents.n, 1});
+            constexpr int kCalls = 200;
+            for (int warmup = 0; warmup < 5; ++warmup) {
+                ops::detail::launch_nvfp4_gather_gemv(t_in, static_cast<const ninfer::Weight*>(device_table),
+                                                      static_cast<const std::int32_t*>(device_slots), 0,
+                                                      extents, t_out, nullptr);
+            }
+            cudaDeviceSynchronize();
+            const auto gather_begin = std::chrono::steady_clock::now();
+            for (int call = 0; call < kCalls; ++call) {
+                ops::detail::launch_nvfp4_gather_gemv(t_in, static_cast<const ninfer::Weight*>(device_table),
+                                                      static_cast<const std::int32_t*>(device_slots), 0,
+                                                      extents, t_out, nullptr);
+            }
+            cudaDeviceSynchronize();
+            const double gather_seconds = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - gather_begin).count();
+            const double bytes = double(extents.n) * double(extents.k) * 0.5625;
+            std::printf("gather: %.1f us/call, %.0f GB/s, %.2f MB per call\n",
+                        gather_seconds / kCalls * 1e6, bytes * kCalls / gather_seconds / 1e9,
+                        bytes / 1e6);
+            cudaFree(output);
+            cudaFree(input);
+            cudaFree(device_slots);
+            ninfer::models::inkling2::free_weight_table(device_table);
+            return 0;
         }
         if (generate_steps > 0) {
             // Greedy generation: the point is that the chain produces a sequence, not that the

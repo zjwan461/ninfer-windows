@@ -297,10 +297,10 @@ Session::Session(TextWeights& weights, const Config& config, DeviceContext& devi
     s.v_cache = allocate(std::size_t(s.width) * kv_slot);
     const auto state_bytes = context == 0 ? 0 : 1;
 
-    s.k_state = allocate(std::size_t(s.width) * kKv * kConvState * 2);
-    s.v_state = allocate(std::size_t(s.width) * kKv * kConvState * 2);
-    s.attn_state = allocate(std::size_t(s.width) * kHidden * kConvState * 2);
-    s.mlp_state = allocate(std::size_t(s.width) * kHidden * kConvState * 2);
+    s.k_state = allocate(std::size_t(2 * s.width) * kKv * kConvState * 2);
+    s.v_state = allocate(std::size_t(2 * s.width) * kKv * kConvState * 2);
+    s.attn_state = allocate(std::size_t(2 * s.width) * kHidden * kConvState * 2);
+    s.mlp_state = allocate(std::size_t(2 * s.width) * kHidden * kConvState * 2);
     s.state_scratch = allocate(std::size_t(std::max(kKv, kHidden)) * kConvState * 2);
     (void)state_bytes;
 
@@ -355,10 +355,10 @@ void Session::reset() {
     const auto kv_slot = std::size_t(s.options.max_context) * kKvHeads * kHeadDim * 2;
     check(cudaMemset(s.k_cache, 0, std::size_t(s.width) * kv_slot), "reset k");
     check(cudaMemset(s.v_cache, 0, std::size_t(s.width) * kv_slot), "reset v");
-    check(cudaMemset(s.k_state, 0, std::size_t(s.width) * kKv * kConvState * 2), "reset ks");
-    check(cudaMemset(s.v_state, 0, std::size_t(s.width) * kKv * kConvState * 2), "reset vs");
-    check(cudaMemset(s.attn_state, 0, std::size_t(s.width) * kHidden * kConvState * 2), "reset as");
-    check(cudaMemset(s.mlp_state, 0, std::size_t(s.width) * kHidden * kConvState * 2), "reset ms");
+    check(cudaMemset(s.k_state, 0, std::size_t(2 * s.width) * kKv * kConvState * 2), "reset ks");
+    check(cudaMemset(s.v_state, 0, std::size_t(2 * s.width) * kKv * kConvState * 2), "reset vs");
+    check(cudaMemset(s.attn_state, 0, std::size_t(2 * s.width) * kHidden * kConvState * 2), "reset as");
+    check(cudaMemset(s.mlp_state, 0, std::size_t(2 * s.width) * kHidden * kConvState * 2), "reset ms");
     check(cudaMemset(s.stack, 0, std::size_t(kStackLimit) * kHidden * 2), "reset stack");
 }
 
@@ -369,6 +369,7 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
     const Config& config = *s.config;
     const int stack_limit = kStackLimit;
     const int position_now = s.position_now;
+    const int state_parity = position_now & 1;
     if (position_now >= s.options.max_context) {
         throw std::out_of_range("inkling2 session: context exhausted");
     }
@@ -569,13 +570,18 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
             const bool is_key = stream_index == 0;
             void* base = is_key ? s.k : s.v;
             void* out = is_key ? s.k_conv : s.v_conv;
-            void* state = is_key ? static_cast<char*>(s.k_state) + std::size_t(slot) * kKv * kConvState * 2
-                                 : static_cast<char*>(s.v_state) + std::size_t(slot) * kKv * kConvState * 2;
+            void* state =
+                is_key ? static_cast<char*>(s.k_state) +
+                             std::size_t(2 * slot + state_parity) * kKv * kConvState * 2
+                       : static_cast<char*>(s.v_state) +
+                             std::size_t(2 * slot + state_parity) * kKv * kConvState * 2;
+            Tensor state_next(static_cast<char*>(state) + std::size_t(kKv) * kConvState * 2,
+                              DType::BF16, {kKv, kConvState});
             if (sliding) {
                 auto conv = dense_tensor(weights, layer[is_key ? Role::KSconv : Role::VSconv]);
                 Tensor conv2d(conv.data, DType::BF16, {kKv, 4});
                 causal_dconv_residual(vec(base, kKv), conv2d, Tensor(state, DType::BF16, {kKv, kConvState}),
-                                      state_kv, vec(out, kKv), stream);
+                                      state_next, vec(out, kKv), stream);
             } else {
                 const auto proj = matrix_weight(weights, layer[is_key ? Role::KSconvProj : Role::VSconvProj]);
                 linear(vec(is_key ? s.kn : s.vn, kHidden), proj, vec(s.dyn, 32), stream);
@@ -583,10 +589,9 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
                 Tensor static_4c(static_w.data, DType::BF16, {4, kKv});
                 dynamic_short_conv(vec(base, kKv), static_4c, vec(s.dyn, 32),
                                    Tensor(state, DType::BF16, {kKv, kConvState}),
-                                   state_kv, vec(out, kKv), kKvHeads, stream);
+                                   state_next, vec(out, kKv), kKvHeads, stream);
             }
-            copy_counted(state, s.state_scratch, std::size_t(kKv) * kConvState * 2,
-                            cudaMemcpyDeviceToDevice, stream);
+            // double buffered: no copy back
         }
         ScaledL2ClipArgs k_args;
         k_args.rows = 1; k_args.heads = kKvHeads; k_args.head_dim = kHeadDim;
@@ -661,14 +666,16 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
         linear_role(layer, Role::WoUd, s.attn, kQ, kHidden, s.proj);
         if (stage_sink) { stage_sink(layer_index, "attnpre", s.proj, kHidden); }
         {
-            char* state = static_cast<char*>(s.attn_state) + std::size_t(slot) * kHidden * kConvState * 2;
+            char* state = static_cast<char*>(s.attn_state) +
+                          std::size_t(2 * slot + state_parity) * kHidden * kConvState * 2;
+            Tensor state_next(state + std::size_t(kHidden) * kConvState * 2, DType::BF16,
+                              {kHidden, kConvState});
             auto conv = dense_tensor(weights, layer[Role::AttnSconv]);
             Tensor conv2d(conv.data, DType::BF16, {kHidden, 4});
             causal_dconv_residual(vec(s.proj, kHidden), conv2d,
                                   Tensor(state, DType::BF16, {kHidden, kConvState}),
-                                  state_hidden, vec(s.attn_conv, kHidden), stream);
-            copy_counted(state, s.state_scratch, std::size_t(kHidden) * kConvState * 2,
-                            cudaMemcpyDeviceToDevice, stream);
+                                  state_next, vec(s.attn_conv, kHidden), stream);
+            // double buffered: no copy back
         }
         if (stage_sink) { stage_sink(layer_index, "attn", s.attn_conv, kHidden); }
 
@@ -841,14 +848,16 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
     moe_done:;
 
         {
-            char* state = static_cast<char*>(s.mlp_state) + std::size_t(slot) * kHidden * kConvState * 2;
+            char* state = static_cast<char*>(s.mlp_state) +
+                          std::size_t(2 * slot + state_parity) * kHidden * kConvState * 2;
+            Tensor state_next(state + std::size_t(kHidden) * kConvState * 2, DType::BF16,
+                              {kHidden, kConvState});
             auto conv = dense_tensor(weights, layer[Role::MlpSconv]);
             Tensor conv2d(conv.data, DType::BF16, {kHidden, 4});
             causal_dconv_residual(vec(s.down, kHidden), conv2d,
                                   Tensor(state, DType::BF16, {kHidden, kConvState}),
-                                  state_hidden, vec(s.mlp_conv, kHidden), stream);
-            copy_counted(state, s.state_scratch, std::size_t(kHidden) * kConvState * 2,
-                            cudaMemcpyDeviceToDevice, stream);
+                                  state_next, vec(s.mlp_conv, kHidden), stream);
+            // double buffered: no copy back
         }
         if (stage_sink) { stage_sink(layer_index, "mlp", s.mlp_conv, kHidden); }
         residual_store_bf16(vec(s.h, kHidden), residual, vec(s.mlp_conv, kHidden), stream);

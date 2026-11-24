@@ -735,7 +735,38 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
             s.expert_w13_template[static_cast<std::size_t>(layer_index)];
         const Weight& w2_extents = s.expert_w2_template[static_cast<std::size_t>(layer_index)];
         const bool nvfp4_experts = w13_extents.qtype == QType::NVFP4;
+        const auto expert_index_for_compare = static_cast<std::size_t>(indices[0]);
         for (int j = 0; j < kTopK && !skip_experts; ++j) {
+            if (device_experts && std::getenv("NINFER_INKLING2_COMPARE_EXPERTS") != nullptr &&
+                slot == 0 && j == 0) {
+                // Localises a disagreement instead of guessing at it: the same product through both
+                // routes, compared on the host at the first visit of the token.
+                linear(vec(s.mlp_in, kHidden), matrix_weight(weights, layer.expert_w13[expert_index_for_compare]),
+                       vec(s.concat, 2 * kInter), stream);
+                if (nvfp4_experts) {
+                    ops::detail::launch_nvfp4_gather_gemv(vec(s.mlp_in, kHidden), w13_table,
+                                                          expert_slots, 0, w13_extents,
+                                                          vec(s.gate_up, 2 * kInter), stream);
+                } else {
+                    ops::detail::launch_q8_gather_gemv(vec(s.mlp_in, kHidden), w13_table,
+                                                       expert_slots, 0, w13_extents,
+                                                       vec(s.gate_up, 2 * kInter), stream);
+                }
+                check(cudaStreamSynchronize(stream), "compare wait");
+                std::vector<std::uint16_t> reference(static_cast<std::size_t>(2 * kInter));
+                std::vector<std::uint16_t> gathered_bits(static_cast<std::size_t>(2 * kInter));
+                check(cudaMemcpy(reference.data(), s.concat, reference.size() * 2,
+                                 cudaMemcpyDeviceToHost), "compare reference");
+                check(cudaMemcpy(gathered_bits.data(), s.gate_up, gathered_bits.size() * 2,
+                                 cudaMemcpyDeviceToHost), "compare gathered");
+                std::size_t differing = 0;
+                std::printf("compare w13 visit 0: direct=%u gathered=%u\n", reference[0],
+                            gathered_bits[0]);
+                for (std::size_t i = 0; i < reference.size(); ++i) {
+                    if (reference[i] != gathered_bits[i]) { ++differing; }
+                }
+                std::printf("compare w13: %zu of %zu values differ\n", differing, reference.size());
+            }
             if (device_experts) {
                 if (nvfp4_experts) {
                     ops::detail::launch_nvfp4_gather_gemv(vec(s.mlp_in, kHidden), w13_table,

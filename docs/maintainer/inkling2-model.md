@@ -406,6 +406,23 @@ That reorders the next steps. Fewer launches would save the 6 ms a token of laun
 wasted bandwidth is the larger number and it comes from the access pattern rather than the count, so
 coalescing the code-plane read comes first.
 
+## 8g7. The copies, which were never counted
+
+A step issues 1531 kernels and **997 device copies**. Each copy is a driver call of a few hundred
+bytes to a few kilobytes, so at roughly five microseconds apiece the copies are about 5 ms of a 34 ms
+token - and they were absent from every account until a counter was put around them.
+
+Thirty-six copy sites, eighteen of them moving a full hidden vector. Most are the same pattern: a
+buffer is copied so that a later operation can read a familiar name. Three of them have now been
+removed by pointing the later consumer at the producer's buffer instead (the KV store, the relative
+states, the concatenated message gates), and each removal showed up as nothing in the counters until
+the copies themselves were counted.
+
+That is the pattern to keep applying: find a copy whose destination exists only to be read by the next
+line, and delete both the copy and the name. It is the cheapest kind of change in this path - no
+arithmetic moves, so the oracle either stays at 5 of 5 or the change was wrong - and it is now
+measurable.
+
 ## 8g. Where the decode time actually goes
 
 Measured, in this order, each one killing the previous theory:

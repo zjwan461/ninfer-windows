@@ -131,6 +131,19 @@ used, or every comparison is meaningless: the block states, the attention inputs
 all belong to a different prompt. `--token-id 1234` is the token the current oracle was recorded
 with; `layer0.in_00` matching `visit_in_0` exactly is the check that it is the right one.
 
+## 9e. The tokenizer is not a drop-in
+
+The engine already carries a BPE encoder, and Inkling 2's `tokenizer.json` looks like the same
+family: GPT-2 style byte-level BPE, 199998 vocabulary entries, 424413 merges, 60 added tokens. It
+is not the same tokenizer, though. The existing encoder hard-codes Qwen's pre-tokenisation regex
+and rejects anything else, while Inkling 2 splits with the Llama-3 style pattern
+`[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+...`.
+
+So producing text from this engine needs a second pre-tokeniser implementation and its own tests,
+not a namespace move. The reference is close at hand - `transformers` encodes and decodes the same
+strings, so the encoder can be checked token for token - but it is a few hundred lines of Unicode
+classification work, and worth knowing before anyone plans around it.
+
 ## 9d. Runbook: measuring on an RTX 4080 SUPER
 
 The 32 GB card holds the pass-through artifact as it stands, so nothing has to be re-converted.

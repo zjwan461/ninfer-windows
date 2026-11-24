@@ -72,7 +72,66 @@ __global__ void nvfp4_generic_gemv_kernel(const __nv_bfloat16* __restrict__ x,
     if (lane == 0) { out[row] = __float2bfloat16(accumulator / divisor); }
 }
 
+// The same arithmetic with the weight read from a device-side table by slot, so the choice of expert
+// never has to reach the host. One thread per row keeps it simple: it is the reference shape, and the
+// point of the route is that a captured graph can contain it.
+__global__ void nvfp4_gather_gemv_kernel(const __nv_bfloat16* __restrict__ x,
+                                         const Weight* __restrict__ table, int slot,
+                                         __nv_bfloat16* __restrict__ out, int rows, int k,
+                                         float divisor) {
+    const int warps_per_block = blockDim.x / 32;
+    const int row = blockIdx.x * warps_per_block + threadIdx.x / 32;
+    if (row >= rows) { return; }
+    const Weight weight = table[slot];
+    const auto* codes = static_cast<const std::uint8_t*>(weight.qdata);
+    const auto* scales = static_cast<const std::uint8_t*>(weight.scales);
+    const int lane = threadIdx.x % 32;
+    const int groups = k / 16;
+    const std::int64_t code_base = std::int64_t(row) * (k / 2);
+
+    float accumulator = 0.0F;
+    for (int group = lane; group < groups; group += 32) {
+        const std::uint32_t* words =
+            reinterpret_cast<const std::uint32_t*>(codes + code_base + group * 8);
+        const std::uint32_t lo = words[0];
+        const std::uint32_t hi = words[1];
+        const float scale = decode_nvfp4_e4m3(scales[generic_scale_offset(row, group, groups)]);
+        const int base = group * 16;
+#pragma unroll
+        for (int pair = 0; pair < 4; ++pair) {
+            const float2 values = decode_nvfp4_e2m1x2(std::uint8_t(lo >> (8 * pair)));
+            accumulator += scale * (values.x * __bfloat162float(x[base + 2 * pair]) +
+                                    values.y * __bfloat162float(x[base + 2 * pair + 1]));
+        }
+#pragma unroll
+        for (int pair = 0; pair < 4; ++pair) {
+            const float2 values = decode_nvfp4_e2m1x2(std::uint8_t(hi >> (8 * pair)));
+            accumulator += scale * (values.x * __bfloat162float(x[base + 8 + 2 * pair]) +
+                                    values.y * __bfloat162float(x[base + 8 + 2 * pair + 1]));
+        }
+    }
+#pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        accumulator += __shfl_xor_sync(0xffffffffu, accumulator, offset);
+    }
+    if (lane == 0) { out[row] = __float2bfloat16(accumulator / divisor); }
+}
+
 } // namespace
+
+void launch_nvfp4_gather_gemv(const Tensor& x, const Weight* table, int slot, Tensor& out,
+                              cudaStream_t stream) {
+    const Weight weight = table[slot];
+    const int rows = weight.n;
+    const int k = weight.k;
+    if (rows <= 0 || k <= 0) { return; }
+    constexpr int kThreads = 256;
+    const int warps = kThreads / 32;
+    const auto blocks = static_cast<unsigned>((rows + warps - 1) / warps);
+    nvfp4_gather_gemv_kernel<<<blocks, kThreads, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(x.data), table, slot,
+        static_cast<__nv_bfloat16*>(out.data), rows, k, weight.weight_scale_divisor);
+}
 
 void launch_nvfp4_generic_gemv(const Tensor& x, const Weight& weight, Tensor& out,
                                cudaStream_t stream) {

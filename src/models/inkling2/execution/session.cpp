@@ -583,7 +583,9 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
         scaled_l2_clip(Tensor(s.rel, DType::BF16, {kRel, 1}),
                        dense_tensor(weights, layer[Role::RelClip]),
                        sliding ? nullptr : &position_t, rel_args, vec(s.rel_clip, kRel), stream);
-        cudaMemcpyAsync(s.rel, s.rel_clip, kRel * 2, cudaMemcpyDeviceToDevice, stream);
+        // The clip's output is used directly from here on: copying it back into the projection's
+        // buffer was a launch that existed only to keep a name.
+        void* rel_states = s.rel_clip;
         linear_role(layer, Role::AttnSink, s.qn, kHidden, kHeads, s.sink);
         linear_role(layer, Role::GateAttn, s.qn, kHidden, kQ, s.gate);
         if (stage_sink) { stage_sink(layer_index, "sink", s.sink, kHeads); }
@@ -619,7 +621,7 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
             args.scale = 1.0F / std::sqrt(float(kHeadDim));
             relbias_attention(vec(s.q, kQ), Tensor(k_base, DType::BF16, {kHeadDim, kKvHeads * s.options.max_context}),
                               Tensor(v_base, DType::BF16, {kHeadDim, kKvHeads * s.options.max_context}),
-                              vec(s.rel, kRel), dense_tensor(weights, layer[Role::RelLogits]),
+                              vec(rel_states, kRel), dense_tensor(weights, layer[Role::RelLogits]),
                               vec(s.sink, kHeads), vec(s.gate, kQ), args, vec(s.attn, kQ), stream);
         }
         linear_role(layer, Role::WoUd, s.attn, kQ, kHidden, s.proj);

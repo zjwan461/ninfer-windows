@@ -121,11 +121,19 @@ int main(int argc, char** argv) {
             void* device_arg = nullptr;
             cudaMalloc(&device_arg, sizeof(std::int32_t));
             Tensor argmax_out(device_arg, DType::I32, {1});
+            double step_seconds = 0.0;
+            double argmax_seconds = 0.0;
             const auto argmax_of = [&](std::uint32_t input) {
+                const auto step_begin = std::chrono::steady_clock::now();
                 const auto logits_now = session.step(input, nullptr);
+                cudaDeviceSynchronize();
+                const auto step_end = std::chrono::steady_clock::now();
+                step_seconds += std::chrono::duration<double>(step_end - step_begin).count();
                 ops::argmax(logits_now, argmax_out, logits_now.ne[0], nullptr);
                 std::int32_t best = 0;
                 cudaMemcpy(&best, device_arg, sizeof(best), cudaMemcpyDeviceToHost);
+                const auto argmax_end = std::chrono::steady_clock::now();
+                argmax_seconds += std::chrono::duration<double>(argmax_end - step_end).count();
                 return static_cast<std::uint32_t>(best);
             };
             const auto begin = std::chrono::steady_clock::now();
@@ -141,6 +149,8 @@ int main(int argc, char** argv) {
             for (auto id : prompt_ids) { std::cout << " " << id; }
             std::cout << "\ngenerated:";
             for (auto id : generated) { std::cout << " " << id; }
+            std::cout << "  step " << (step_seconds / generate_steps * 1e3) << " ms, argmax "
+                      << (argmax_seconds / generate_steps * 1e3) << " ms per token\n";
             std::cout << "\n" << generate_steps << " tokens in " << seconds << " s -> "
                       << (double(generate_steps) / seconds) << " tok/s\n";
             cudaFree(device_arg);

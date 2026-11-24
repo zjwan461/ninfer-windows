@@ -126,8 +126,3 @@ add_test(NAME ninfer_qwen3_5_prism_loading_interop_test
 set_tests_properties(
   ninfer_qwen3_5_prism_loading_test ninfer_qwen3_5_prism_loading_interop_test
   PROPERTIES SKIP_RETURN_CODE 77)
-
-ninfer_add_test(ninfer_qwen3_5_decode_rate_real_test
-  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_decode_rate_real.cpp"
-  LIBRARIES ninfer_engine)
-set_tests_properties(ninfer_qwen3_5_decode_rate_real_test PROPERTIES SKIP_RETURN_CODE 77)

@@ -10,6 +10,7 @@
 #include "ops/op_counters.h"
 #include "models/inkling2/execution/weight_table.h"
 #include "ops/linear/nvfp4/nvfp4_launch.h"
+#include "ninfer/ops/linear.h"
 
 #include <cstdlib>
 #include <chrono>
@@ -211,6 +212,22 @@ int main(int argc, char** argv) {
             const double gather_seconds = std::chrono::duration<double>(
                 std::chrono::steady_clock::now() - gather_begin).count();
             const double bytes = double(extents.n) * double(extents.k) * 0.5625;
+            // The same matrix through the contiguous tuned route, which is what a stacked expert
+            // bank would let the gather route become. This bounds what that change is worth before
+            // anyone rewrites the converter.
+            for (int warmup = 0; warmup < 5; ++warmup) {
+                ops::linear(t_in, table.front(), t_out, nullptr);
+            }
+            cudaDeviceSynchronize();
+            const auto direct_begin = std::chrono::steady_clock::now();
+            for (int call = 0; call < kCalls; ++call) {
+                ops::linear(t_in, table.front(), t_out, nullptr);
+            }
+            cudaDeviceSynchronize();
+            const double direct_seconds = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - direct_begin).count();
+            std::printf("direct: %.1f us/call, %.0f GB/s\n", direct_seconds / kCalls * 1e6,
+                        bytes * kCalls / direct_seconds / 1e9);
             std::printf("gather: %.1f us/call, %.0f GB/s, %.2f MB per call\n",
                         gather_seconds / kCalls * 1e6, bytes * kCalls / gather_seconds / 1e9,
                         bytes / 1e6);

@@ -760,6 +760,14 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
                 check(cudaMemcpy(gathered_bits.data(), s.gate_up, gathered_bits.size() * 2,
                                  cudaMemcpyDeviceToHost), "compare gathered");
                 std::size_t differing = 0;
+                const auto actual = matrix_weight(weights, layer.expert_w13[expert_index_for_compare]);
+                std::printf("extents n=%d k=%d group=%d divisor=%g layout=%d | actual n=%d k=%d "
+                            "group=%d divisor=%g layout=%d | kInter=%d kHidden=%d\n",
+                            w13_extents.n, w13_extents.k, w13_extents.group,
+                            double(w13_extents.weight_scale_divisor),
+                            static_cast<int>(w13_extents.layout), actual.n, actual.k,
+                            actual.group, double(actual.weight_scale_divisor),
+                            static_cast<int>(actual.layout), kInter, kHidden);
                 std::printf("compare w13 visit 0: direct=%u gathered=%u\n", reference[0],
                             gathered_bits[0]);
                 for (std::size_t i = 0; i < reference.size(); ++i) {

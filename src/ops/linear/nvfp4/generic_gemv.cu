@@ -78,8 +78,7 @@ __global__ void nvfp4_generic_gemv_kernel(const __nv_bfloat16* __restrict__ x,
 __global__ void nvfp4_gather_gemv_kernel(const __nv_bfloat16* __restrict__ x,
                                          const Weight* __restrict__ table,
                                          const std::int32_t* __restrict__ slots, int slot,
-                                         __nv_bfloat16* __restrict__ out, int rows, int k,
-                                         float divisor) {
+                                         __nv_bfloat16* __restrict__ out, int rows, int k) {
     const int warps_per_block = blockDim.x / 32;
     const int row = blockIdx.x * warps_per_block + threadIdx.x / 32;
     if (row >= rows) { return; }
@@ -115,7 +114,11 @@ __global__ void nvfp4_gather_gemv_kernel(const __nv_bfloat16* __restrict__ x,
     for (int offset = 16; offset > 0; offset >>= 1) {
         accumulator += __shfl_xor_sync(0xffffffffu, accumulator, offset);
     }
-    if (lane == 0) { out[row] = __float2bfloat16(accumulator / divisor); }
+    // The divisor is per expert, not per layer: taking it from the table entry is the only correct
+    // source, and it is also why this route needs no host copy of the weight at all.
+    if (lane == 0) {
+        out[row] = __float2bfloat16(accumulator / weight.weight_scale_divisor);
+    }
 }
 
 } // namespace
@@ -133,7 +136,7 @@ void launch_nvfp4_gather_gemv(const Tensor& x, const Weight* table, const std::i
     const auto blocks = static_cast<unsigned>((rows + warps - 1) / warps);
     nvfp4_gather_gemv_kernel<<<blocks, kThreads, 0, stream>>>(
         static_cast<const __nv_bfloat16*>(x.data), table, slots, slot,
-        static_cast<__nv_bfloat16*>(out.data), rows, k, extents.weight_scale_divisor);
+        static_cast<__nv_bfloat16*>(out.data), rows, k);
 }
 
 void launch_nvfp4_generic_gemv(const Tensor& x, const Weight& weight, Tensor& out,

@@ -335,6 +335,19 @@ the expert part of the budget from 864 to about 150.
 
 Measured with the GPU free: 25.3 / 21.8 / 24.5 tok/s launched, 28.9 / 29.0 captured.
 
+## 8g3. The bandwidth arithmetic, and what it changes
+
+The expert weights read per token are 2.14 GiB - 48 visits times 8 experts times both matrices - and a
+token takes 34.5 ms, so the decode moves 66 GB/s. A 7g slice of this GPU has about 571 GB/s.
+
+Roughly a ninth of the available bandwidth, which is what an uncoalesced read looks like: the gather
+route reads its code plane eight bytes at a time with a lane stride, so a warp touches a 256-byte span
+per group rather than pulling a contiguous run.
+
+That reorders the next steps. Fewer launches would save the 6 ms a token of launch cost, but the
+wasted bandwidth is the larger number and it comes from the access pattern rather than the count, so
+coalescing the code-plane read comes first.
+
 ## 8g. Where the decode time actually goes
 
 Measured, in this order, each one killing the previous theory:

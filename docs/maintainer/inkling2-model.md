@@ -245,6 +245,22 @@ of NVFP4 for the loop core's twelve layers and 5.38 GiB of q8 for the coda's fou
 A Q3 format would go further, but it means a codec, a kernel and their tests; the numbers above
 say it is not needed for the 16 GB target, so it stays unbuilt.
 
+## 8f. How far ahead this engine is supposed to be
+
+The engine has a recorded head-to-head on a card of this class (`docs/llamacpp-comparison.md`,
+Qwen3.8-27B, RTX 4090, same day, both engines): decode without speculation is 50.5 tok/s against
+llama.cpp's 45.9 at depth 0, and 39.6 against 33.1 at 128K. With MTP it is 148.6 against 118.8.
+
+So the honest expectation for a model of this shape is **ten to twenty-five percent ahead of
+llama.cpp, not two to three times**. That is the number to hold this port to, and it makes the
+current Inkling 2 result - 15 to 24 tok/s against 51.4 on the same slice - a three-fold regression
+from where the engine normally sits rather than "a new model that needs tuning".
+
+That gap is large enough that the cause is structural, and the three candidates are the ones §8e
+lists: 48 routing readbacks per token where the Qwen path has none, roughly a thousand kernel
+launches per token, and an expert GEMV on a runtime-extent route. The first is the only one that is
+a different *shape* of execution rather than a slower version of the same one.
+
 ## 8e. The baseline to beat
 
 `/workspaces/llama.cpp` carries a built `llama-bench` and an `Inkling-2-Mini-mainline-Q4_K_M.gguf`

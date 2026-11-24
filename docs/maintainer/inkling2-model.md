@@ -245,6 +245,23 @@ of NVFP4 for the loop core's twelve layers and 5.38 GiB of q8 for the coda's fou
 A Q3 format would go further, but it means a codec, a kernel and their tests; the numbers above
 say it is not needed for the 16 GB target, so it stays unbuilt.
 
+## 8h. What the host cost is not
+
+The 25 us per operation that §8g leaves unexplained was chased one step further, and three more
+candidates are out:
+
+- `ops::linear` validates shape, dtype, contiguity and alignment with a dozen integer comparisons and
+  no allocation, so the wrapper is not it;
+- no op wrapper allocates or synchronises - the only `cudaMemcpy` in the whole wrapper layer is the
+  pitched scatter, which this path does not call;
+- `Weight` is a flat struct returned by value, so `matrix_weight` copies about a hundred bytes.
+
+That leaves the per-operation accounting itself, which cannot be settled by inspection: it needs a
+profiler that counts calls by name and accumulates host time around them. Until that exists, the
+honest statement is that the token is host-bound and that the cost is spread across the operations
+rather than concentrated in one, which is a different fix - fewer operations per visit, and fewer
+visits repeated - from making one function faster.
+
 ## 8g. Where the decode time actually goes
 
 Measured, in this order, each one killing the previous theory:

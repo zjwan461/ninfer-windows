@@ -394,8 +394,11 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
         head_rmsnorm(vec(message, kHidden), kEps, vec(concat_second, kHidden), stream);
         linear(vec(s.concat, 2 * kHidden), matrix_weight(weights, layer[down]),
                vec(s.controller, 64), stream);
-        linear_role(layer, forget_proj, s.controller, 64, kHidden, s.forget);
-        linear_role(layer, gain_proj, s.controller, 64, kHidden, s.gain);
+        // The two gates read the same 64-wide controller state, so they are one launch.
+        ops::detail::launch_bf16_dual_gemv(vec(s.controller, 64), vec(s.controller, 64),
+                                           matrix_weight(weights, layer[forget_proj]),
+                                           matrix_weight(weights, layer[gain_proj]),
+                                           vec(s.forget, kHidden), vec(s.gain, kHidden), stream);
         message_merge(vec(x, kHidden), vec(message, kHidden), vec(s.forget, kHidden),
                       vec(s.gain, kHidden), vec(out, kHidden), stream);
     };

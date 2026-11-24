@@ -15,6 +15,7 @@ target_sources(ninfer_ops PRIVATE
   "${CMAKE_CURRENT_LIST_DIR}/launcher/dynamic_short_conv.cu"
   "${CMAKE_CURRENT_LIST_DIR}/launcher/head_rmsnorm.cu"
   "${CMAKE_CURRENT_LIST_DIR}/launcher/rmsnorm_dual.cu"
+  "${CMAKE_CURRENT_LIST_DIR}/launcher/rmsnorm_triple.cu"
   "${CMAKE_CURRENT_LIST_DIR}/launcher/softcapped_swiglu.cu"
   "${CMAKE_CURRENT_LIST_DIR}/launcher/moe_router.cu"
   "${CMAKE_CURRENT_LIST_DIR}/launcher/message_merge.cu"

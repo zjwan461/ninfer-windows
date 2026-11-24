@@ -521,18 +521,17 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
         }
 
         // ---- per-stream norms ---------------------------------------------------------------
-        if (sliding) {
-            const auto norm = dense_tensor(weights, layer[Role::AttnNorm]);
-            rmsnorm(vec(s.q_in, kHidden), norm, kEps, false, vec(s.qn, kHidden), stream);
-            rmsnorm(vec(s.k_in, kHidden), norm, kEps, false, vec(s.kn, kHidden), stream);
-            rmsnorm(vec(s.v_in, kHidden), norm, kEps, false, vec(s.vn, kHidden), stream);
-        } else {
-            rmsnorm(vec(s.q_in, kHidden), dense_tensor(weights, layer[Role::QInputNorm]), kEps,
-                    false, vec(s.qn, kHidden), stream);
-            rmsnorm(vec(s.k_in, kHidden), dense_tensor(weights, layer[Role::KInputNorm]), kEps,
-                    false, vec(s.kn, kHidden), stream);
-            rmsnorm(vec(s.v_in, kHidden), dense_tensor(weights, layer[Role::VInputNorm]), kEps,
-                    false, vec(s.vn, kHidden), stream);
+        {
+            // One launch for the three streams: they share a geometry and differ in input, gain and
+            // output, and the outputs are passed separately so nothing depends on the arena's layout.
+            const auto q_gain = dense_tensor(weights, layer[sliding ? Role::AttnNorm : Role::QInputNorm]);
+            const auto k_gain = dense_tensor(weights, layer[sliding ? Role::AttnNorm : Role::KInputNorm]);
+            const auto v_gain = dense_tensor(weights, layer[sliding ? Role::AttnNorm : Role::VInputNorm]);
+            ops::detail::rmsnorm_triple_launch(
+                vec(s.q_in, kHidden), vec(s.k_in, kHidden), vec(s.v_in, kHidden),
+                Tensor(q_gain.data, DType::BF16, {kHidden}), Tensor(k_gain.data, DType::BF16, {kHidden}),
+                Tensor(v_gain.data, DType::BF16, {kHidden}), vec(s.qn, kHidden), vec(s.kn, kHidden),
+                vec(s.vn, kHidden), kEps, stream);
         }
         if (stage_sink) { stage_sink(layer_index, "ln", s.qn, kHidden); }
 

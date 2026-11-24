@@ -335,6 +335,23 @@ the expert part of the budget from 864 to about 150.
 
 Measured with the GPU free: 25.3 / 21.8 / 24.5 tok/s launched, 28.9 / 29.0 captured.
 
+## 8g4. What the A3B MoE path teaches, even though it cannot be reused
+
+The engine already has a fused sparse-MoE op (`ops::sparse_moe`), and reading it is worth more than
+the op itself: it is **closed to one exact geometry** - 2048 hidden, 256 experts, top-8, plus a shared
+expert - so it cannot be called for this model, which is 2304 hidden, 128 experts and no shared
+expert.
+
+What it does teach is the shape the data has to be in. Its routed bank is a single contiguous weight,
+`[256*1024, 2048]`, and "expert e directly selects its stored row spans; no selected-weight gather or
+repack occurs". That is why it can be one launch and coalesced: there is nothing to gather.
+
+This port stores each expert as a separate artifact object, so it gathers 128 pointers per layer and
+pays a scattered read for every one of them. Matching the A3B path means changing the container, not
+the kernel: one stacked bank per layer for gate/up and one for down, expert e a row span. The kernels
+then lose the indirection entirely, and the per-visit launch count falls to the three the fusion was
+going to cost anyway.
+
 ## 8g3. The bandwidth arithmetic, and what it changes
 
 The expert weights read per token are 2.14 GiB - 48 visits times 8 experts times both matrices - and a

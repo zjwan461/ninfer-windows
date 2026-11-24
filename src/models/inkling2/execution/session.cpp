@@ -536,7 +536,15 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
         q_args.threshold = kQkThreshold;
         q_args.tau_alpha = sliding ? 0.0F : kLogAlpha;
         q_args.tau_floor = kLogFloor;
-        linear_role(layer, Role::WqDu, s.qn, kHidden, kQ, s.q);
+        // Query, sink values and attention gate all read the same normalised query stream, so one
+        // launch produces all three: 3072 rows, 24 rows and 3072 rows from one grid.
+        ops::detail::launch_bf16_triple_gemv(vec(s.qn, kHidden), vec(s.qn, kHidden),
+                                             vec(s.qn, kHidden),
+                                             matrix_weight(weights, layer[Role::WqDu]),
+                                             matrix_weight(weights, layer[Role::AttnSink]),
+                                             matrix_weight(weights, layer[Role::GateAttn]),
+                                             vec(s.q, kQ), vec(s.sink, kHeads), vec(s.gate, kQ),
+                                             stream);
         scaled_l2_clip(Tensor(s.q, DType::BF16, {kQ, 1}),
                        dense_tensor(weights, layer[Role::QkClip]),
                        sliding ? nullptr : &position_t, q_args, vec(s.q_clip, kQ), stream);
@@ -606,12 +614,7 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
         // The clip's output is used directly from here on: copying it back into the projection's
         // buffer was a launch that existed only to keep a name.
         void* rel_states = s.rel_clip;
-        // Both read the same normalised query stream; one launch produces the sink values and the
-        // attention gate.
-        ops::detail::launch_bf16_dual_gemv(vec(s.qn, kHidden), vec(s.qn, kHidden),
-                                           matrix_weight(weights, layer[Role::AttnSink]),
-                                           matrix_weight(weights, layer[Role::GateAttn]),
-                                           vec(s.sink, kHeads), vec(s.gate, kQ), stream);
+        // The sink values and the gate were produced with the query projection above.
         if (stage_sink) { stage_sink(layer_index, "sink", s.sink, kHeads); }
 
         // ---- attention over this visit's cache -------------------------------------------

@@ -20,6 +20,10 @@ void launch_bf16_dual_gemv(const Tensor& x_a, const Tensor& x_b, const Weight& w
                            const Weight& weight_b,
                            Tensor& out_a, Tensor& out_b, cudaStream_t stream);
 
+void launch_bf16_triple_gemv(const Tensor& x_a, const Tensor& x_b, const Tensor& x_c,
+                             const Weight& weight_a, const Weight& weight_b, const Weight& weight_c,
+                             Tensor& out_a, Tensor& out_b, Tensor& out_c, cudaStream_t stream);
+
 void launch_bf16_generic_gemv(const Tensor& x, const Weight& weight, Tensor& out,
                               cudaStream_t stream);
 

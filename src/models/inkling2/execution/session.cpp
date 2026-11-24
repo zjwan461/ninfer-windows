@@ -603,8 +603,12 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
         // The clip's output is used directly from here on: copying it back into the projection's
         // buffer was a launch that existed only to keep a name.
         void* rel_states = s.rel_clip;
-        linear_role(layer, Role::AttnSink, s.qn, kHidden, kHeads, s.sink);
-        linear_role(layer, Role::GateAttn, s.qn, kHidden, kQ, s.gate);
+        // Both read the same normalised query stream; one launch produces the sink values and the
+        // attention gate.
+        ops::detail::launch_bf16_dual_gemv(vec(s.qn, kHidden), vec(s.qn, kHidden),
+                                           matrix_weight(weights, layer[Role::AttnSink]),
+                                           matrix_weight(weights, layer[Role::GateAttn]),
+                                           vec(s.sink, kHeads), vec(s.gate, kQ), stream);
         if (stage_sink) { stage_sink(layer_index, "sink", s.sink, kHeads); }
 
         // ---- attention over this visit's cache -------------------------------------------

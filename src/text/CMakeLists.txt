@@ -1,5 +1,6 @@
 add_library(ninfer_text STATIC
   unicode.cpp
+  llama3_split.cpp
   ${PROJECT_SOURCE_DIR}/third_party/utf8proc/utf8proc.c
 )
 ninfer_internal_includes(ninfer_text)

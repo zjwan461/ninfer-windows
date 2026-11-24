@@ -2,3 +2,7 @@
 ninfer_add_test(ninfer_text_unicode_categories_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_unicode_categories.cpp"
   LIBRARIES ninfer_text)
+
+ninfer_add_test(ninfer_text_llama3_split_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_llama3_split.cpp"
+  LIBRARIES ninfer_text)

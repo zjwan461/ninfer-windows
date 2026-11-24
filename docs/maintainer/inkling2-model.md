@@ -227,6 +227,32 @@ of NVFP4 for the loop core's twelve layers and 5.38 GiB of q8 for the coda's fou
 A Q3 format would go further, but it means a codec, a kernel and their tests; the numbers above
 say it is not needed for the 16 GB target, so it stays unbuilt.
 
+## 8e. The baseline to beat
+
+`/workspaces/llama.cpp` carries a built `llama-bench` and an `Inkling-2-Mini-mainline-Q4_K_M.gguf`
+(15.46 GiB, 26.07 B parameters), so the reference performance for this model on this machine is
+measurable rather than guessed:
+
+```
+llama-bench -m Inkling-2-Mini-mainline-Q4_K_M.gguf -p 0 -n 32
+tg32    51.42 +- 5.66 t/s      (CUDA, this 78-SM slice)
+```
+
+This engine decodes the same model at 15 to 24 tok/s, so it is two to three times behind, and that
+is the number to close. The differences worth attacking, largest first:
+
+1. **48 device-to-host routing readbacks per token.** llama.cpp keeps the selection on the device
+   and gathers expert weights by index. Here the experts are separate artifact objects and the
+   selection decides host-side weight handles, so every visit drains the queue. Removing this needs
+   a device-side pointer table and a gather route, which is the same shape llama.cpp uses.
+2. **Roughly a thousand kernel launches per token**, because the chain is a sequence of small ops
+   rather than one graph.
+3. The expert GEMV itself, which is a runtime-extent route rather than a shape-tuned one.
+
+The GGUF is Q4_K_M at 15.46 GiB against this artifact's 18.33 GiB of NVFP4, so the comparison is
+between two four-bit-ish recipes rather than like for like; it is still the right target, because
+the user cares about tokens per second on the same question.
+
 ## 8d. Decode rate, and how it moves
 
 `--generate` reports the two numbers separately, because averaging them is misleading:

@@ -800,10 +800,9 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
                         vec(s.act, kInter), w2_table, expert_slots, j, w2_extents, routing_scales,
                         accumulator, stream);
                 } else {
-                    ops::detail::launch_q8_gather_gemv(vec(s.act, kInter), w2_table, expert_slots, j,
-                                                       w2_extents, vec(s.down, kHidden), stream);
-                    axpy_bf16_into_f32_device_scale(accumulator, vec(s.down, kHidden), routing_scales,
-                                                    j, stream);
+                    ops::detail::launch_q8_gather_accumulate(
+                        vec(s.act, kInter), w2_table, expert_slots, j, w2_extents, routing_scales,
+                        accumulator, stream);
                 }
                 continue;
             }

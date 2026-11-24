@@ -28,6 +28,10 @@ void launch_q8_mma_r64x32_c64_k128_a1(const Tensor&, const Weight&, Tensor&, cud
 void launch_q8_gather_gemv(const Tensor& x, const Weight* table, const std::int32_t* slots,
                            int slot, const Weight& extents, Tensor& out, cudaStream_t stream);
 
+void launch_q8_gather_accumulate(const Tensor& x, const Weight* table, const std::int32_t* slots,
+                                 int slot, const Weight& extents, const float* scales,
+                                 Tensor& acc, cudaStream_t stream);
+
 void launch_q8_generic_gemv(const Tensor& x, const Weight& weight, Tensor& out,
                             cudaStream_t stream);
 

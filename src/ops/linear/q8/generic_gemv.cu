@@ -115,4 +115,55 @@ void launch_q8_gather_gemv(const Tensor& x, const Weight* table, const std::int3
     CUDA_CHECK(cudaGetLastError());
 }
 
+// The down product accumulated into an fp32 buffer with the expert's router weight, for the coda
+// layers whose experts are q8.
+__global__ void q8_gather_accumulate_kernel(const __nv_bfloat16* __restrict__ x,
+                                            const Weight* __restrict__ table,
+                                            const std::int32_t* __restrict__ slots, int slot,
+                                            const float* __restrict__ scales,
+                                            float* __restrict__ acc, int rows, int k) {
+    const int warps_per_block = blockDim.x / 32;
+    const int row = blockIdx.x * warps_per_block + threadIdx.x / 32;
+    if (row >= rows) { return; }
+    const Weight weight = table[slots[slot]];
+    const auto* codes = static_cast<const std::int8_t*>(weight.qdata);
+    const auto* block_scales = static_cast<const std::uint16_t*>(weight.scales);
+    const int lane = threadIdx.x % 32;
+    const int groups = k / kGroup;
+    const std::int8_t* code_row = codes + std::int64_t(row) * k;
+    const std::uint16_t* scale_row = block_scales + std::int64_t(row) * groups;
+
+    float accumulator = 0.0F;
+    for (int group = lane; group < groups; group += 32) {
+        const float scale = __half2float(__ushort_as_half(scale_row[group]));
+        float partial = 0.0F;
+        for (int i = 0; i < kGroup; ++i) {
+            const int index = group * kGroup + i;
+            partial += float(code_row[index]) * __bfloat162float(x[index]);
+        }
+        accumulator += scale * partial;
+    }
+#pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        accumulator += __shfl_xor_sync(0xffffffffu, accumulator, offset);
+    }
+    if (lane == 0) { acc[row] += scales[slot] * accumulator; }
+}
+
+void launch_q8_gather_accumulate(const Tensor& x, const Weight* table, const std::int32_t* slots,
+                                 int slot, const Weight& extents, const float* scales,
+                                 Tensor& acc, cudaStream_t stream) {
+    ninfer::ops::op_counters().expert_gemv.fetch_add(1, std::memory_order_relaxed);
+    const int rows = extents.n;
+    const int k = extents.k;
+    if (rows <= 0 || k <= 0 || (k % kGroup) != 0) { return; }
+    constexpr int kThreads = 256;
+    const int warps = kThreads / 32;
+    const auto blocks = static_cast<unsigned>((rows + warps - 1) / warps);
+    q8_gather_accumulate_kernel<<<blocks, kThreads, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(x.data), table, slots, slot, scales,
+        static_cast<float*>(acc.data), rows, k);
+    CUDA_CHECK(cudaGetLastError());
+}
+
 } // namespace ninfer::ops::detail

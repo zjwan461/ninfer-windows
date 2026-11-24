@@ -536,8 +536,10 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
         scaled_l2_clip(Tensor(s.q, DType::BF16, {kQ, 1}),
                        dense_tensor(weights, layer[Role::QkClip]),
                        sliding ? nullptr : &position_t, q_args, vec(s.q_clip, kQ), stream);
-        copy_counted(s.q, s.q_clip, kQ * 2, cudaMemcpyDeviceToDevice, stream);
-        if (stage_sink) { stage_sink(layer_index, "q", s.q, kQ); }
+        // The clipped values are what everything downstream wants, so the projection's buffer is
+        // left alone instead of being overwritten with a copy of its own clipped output.
+        void* q_states = s.q_clip;
+        if (stage_sink) { stage_sink(layer_index, "q", q_states, kQ); }
 
         linear_role(layer, Role::WkDv, s.kn, kHidden, kKv, s.k);
         linear_role(layer, Role::WvDv, s.vn, kHidden, kKv, s.v);
@@ -569,7 +571,8 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
         k_args.threshold = kQkThreshold; k_args.tau_alpha = 0.0F; k_args.tau_floor = kLogFloor;
         scaled_l2_clip(Tensor(s.k_conv, DType::BF16, {kKv, 1}), Tensor(s.ones, DType::BF16, {kKvHeads, kHeadDim}),
                        nullptr, k_args, vec(s.k_clip, kKv), stream);
-        copy_counted(s.k_conv, s.k_clip, kKv * 2, cudaMemcpyDeviceToDevice, stream);
+        // Same as the query stream: the clipped buffer is the one everything reads.
+        void* k_states = s.k_clip;
         // The value stream is normalised per head, not per vector.
         {
             Tensor v_heads_in(s.v_conv, DType::BF16, {kHeadDim, kKvHeads});
@@ -578,7 +581,7 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
         }
         copy_counted(s.v_conv, s.v_clip, kKv * 2, cudaMemcpyDeviceToDevice, stream);
         if (stage_sink) {
-            stage_sink(layer_index, "k", s.k_conv, kKv);
+            stage_sink(layer_index, "k", k_states, kKv);
             stage_sink(layer_index, "v", s.v_conv, kKv);
         }
 
@@ -611,7 +614,7 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
             {
                 const auto cache_pitch = std::size_t(s.options.max_context) * kHeadDim * 2;
                 const auto first_offset = std::size_t(position_now) * kHeadDim * 2;
-                check(cudaMemcpy2DAsync(k_base + first_offset, cache_pitch, s.k_conv,
+                check(cudaMemcpy2DAsync(k_base + first_offset, cache_pitch, k_states,
                                         std::size_t(kHeadDim) * 2, std::size_t(kHeadDim) * 2,
                                         std::size_t(kKvHeads), cudaMemcpyDeviceToDevice, stream),
                       "kv store k");
@@ -628,7 +631,7 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
             args.window = sliding ? 1024 : 0;
             args.rel_extent = 1024; args.d_rel = kDRel;
             args.scale = 1.0F / std::sqrt(float(kHeadDim));
-            relbias_attention(vec(s.q, kQ), Tensor(k_base, DType::BF16, {kHeadDim, kKvHeads * s.options.max_context}),
+            relbias_attention(vec(q_states, kQ), Tensor(k_base, DType::BF16, {kHeadDim, kKvHeads * s.options.max_context}),
                               Tensor(v_base, DType::BF16, {kHeadDim, kKvHeads * s.options.max_context}),
                               vec(rel_states, kRel), dense_tensor(weights, layer[Role::RelLogits]),
                               vec(s.sink, kHeads), vec(s.gate, kQ), args, vec(s.attn, kQ), stream);

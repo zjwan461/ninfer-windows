@@ -352,6 +352,27 @@ the kernel: one stacked bank per layer for gate/up and one for down, expert e a 
 then lose the indirection entirely, and the per-visit launch count falls to the three the fusion was
 going to cost anyway.
 
+## 8g5. The coalescing experiment, which lost
+
+The bandwidth arithmetic above says to widen the reads: four consecutive 16-value groups per lane
+gives 32 contiguous bytes of codes and four adjacent bytes of scales, where one group at a time
+fetches a 32-byte sector for one useful byte.
+
+Measured on the same free GPU, back to back:
+
+| reads | tok/s |
+|---|---|
+| four groups per lane | 22.0 / 22.2 |
+| one group per lane | 28.9 / 28.9 |
+
+It lost by a quarter. So either the scale plane is a smaller share of the traffic than the arithmetic
+assumed, or the wider read costs more in index work and in a loop that has to handle a partial block
+than it saves in sectors. Either way the hypothesis is not supported, and the code was reverted.
+
+The honest position is that 66 GB/s against a slice's 571 is still unexplained rather than explained
+away. What to do next is measure where the kernel's time actually goes - with a clock around the
+kernel or a profiler - instead of continuing to reason about where it should go.
+
 ## 8g3. The bandwidth arithmetic, and what it changes
 
 The expert weights read per token are 2.14 GiB - 48 visits times 8 experts times both matrices - and a

@@ -6,6 +6,7 @@
 #include "models/inkling2/execution/session.h"
 #include "models/inkling2/materialize.h"
 #include "ninfer/ops/argmax.h"
+#include "text/byte_bpe.h"
 
 #include <cstdlib>
 #include <chrono>
@@ -46,6 +47,8 @@ int main(int argc, char** argv) {
         int bench_steps = 0;
         int generate_steps = 0;
         bool capture_graph = false;
+        std::string prompt_text;
+        std::string tokenizer_path = "/workspaces/models/inkling2/tokenizer.json";
         std::filesystem::path reference_stages;
         for (int i = 1; i < argc; ++i) {
             const std::string arg(argv[i]);
@@ -69,6 +72,8 @@ int main(int argc, char** argv) {
             else if (arg == "--bench" && i + 1 < argc) { bench_steps = std::stoi(argv[++i]); }
             else if (arg == "--generate" && i + 1 < argc) { generate_steps = std::stoi(argv[++i]); }
             else if (arg == "--graph") { capture_graph = true; }
+            else if (arg == "--prompt" && i + 1 < argc) { prompt_text = argv[++i]; }
+            else if (arg == "--tokenizer" && i + 1 < argc) { tokenizer_path = argv[++i]; }
             else { throw std::invalid_argument("unknown argument " + arg); }
         }
         if (artifact_path.empty() ||
@@ -136,6 +141,26 @@ int main(int argc, char** argv) {
                       << session.max_context() << ")\n";
             return 0;
         }
+        // A prompt in text is turned into the same token ids the id form would have produced, so the
+        // two ways in are one way in.
+        std::unique_ptr<ninfer::text::ByteBpe> encoder;
+        if (!prompt_text.empty()) {
+            std::ifstream tokenizer_stream(tokenizer_path, std::ios::binary);
+            if (!tokenizer_stream) {
+                std::cerr << "FAIL: cannot open " << tokenizer_path << "\n";
+                return 1;
+            }
+            const std::string json((std::istreambuf_iterator<char>(tokenizer_stream)),
+                                   std::istreambuf_iterator<char>());
+            encoder = std::make_unique<ninfer::text::ByteBpe>(json);
+            prompt_ids.clear();
+            for (const auto id : encoder->encode(prompt_text)) {
+                prompt_ids.push_back(static_cast<std::uint32_t>(id));
+            }
+            std::cout << "prompt tokens:";
+            for (auto id : prompt_ids) { std::cout << " " << id; }
+            std::cout << "\n";
+        }
         if (generate_steps > 0) {
             // Greedy generation: the point is that the chain produces a sequence, not that the
             // sampling policy is interesting. Prompt tokens come from the command line.
@@ -188,6 +213,12 @@ int main(int argc, char** argv) {
             const double seconds = step_seconds;
             const double steady_seconds = step_seconds - warmup_seconds;
             const int steady_tokens = generate_steps - 1;
+            if (encoder != nullptr) {
+                std::vector<std::int32_t> all_ids;
+                for (auto id : prompt_ids) { all_ids.push_back(static_cast<std::int32_t>(id)); }
+                for (auto id : generated) { all_ids.push_back(static_cast<std::int32_t>(id)); }
+                std::cout << "text: " << encoder->decode(all_ids) << "\n";
+            }
             std::cout << "prompt:";
             for (auto id : prompt_ids) { std::cout << " " << id; }
             std::cout << "\ngenerated:";

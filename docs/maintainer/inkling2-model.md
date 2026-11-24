@@ -185,6 +185,24 @@ So the remaining work is the byte bijection, a ranked merge table over it, added
 and the inverse for decoding - testable end to end against `transformers`, which encodes the same
 strings with the same file.
 
+## 9h. Text in, text out
+
+The session test takes text now, so the whole chain is one command:
+
+```
+build/tests/ninfer_inkling2_session_test --artifact inkling2-mini.ninfer \
+    --prompt "The capital of France is" --generate 12 --tokenizer tokenizer.json
+```
+
+which prints the token ids it made from the prompt, the ids it generated, the decoded text, and the
+warm-up and steady-state figures. With the artifact and tokenizer used here it answers
+
+    text: The capital of France is Paris.
+
+That the answer is also *right*, and not merely close to the oracle's logits, is worth a sentence: it
+says the chain is correct at the level a reader would judge it, not only at the level a numerical
+comparison would.
+
 ## 9d. Runbook: measuring on an RTX 4080 SUPER
 
 The 32 GB card holds the pass-through artifact as it stands, so nothing has to be re-converted.

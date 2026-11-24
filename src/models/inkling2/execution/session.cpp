@@ -139,6 +139,7 @@ struct Session::Impl {
     void* controller = nullptr;
     void* gate_up = nullptr;
     void* act = nullptr;
+    void* expert_act = nullptr;
     void* down = nullptr;
     void* mlp_conv = nullptr;
     void* moe_acc = nullptr;
@@ -235,6 +236,8 @@ Session::Session(TextWeights& weights, const Config& config, DeviceContext& devi
     s.controller = allocate(std::size_t(64) * 2);
     s.gate_up = allocate(std::size_t(2 * kInter) * 2);
     s.act = allocate(std::size_t(kInter) * 2);
+    // One activation per routed expert, filled by a single launch.
+    s.expert_act = allocate(std::size_t(kTopK) * std::size_t(kInter) * 2);
     s.down = allocate(hidden_bytes);
     s.mlp_conv = allocate(hidden_bytes);
     s.moe_acc = allocate(std::size_t(kHidden) * 4);
@@ -777,53 +780,19 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
             s.expert_w13_template[static_cast<std::size_t>(layer_index)];
         const Weight& w2_extents = s.expert_w2_template[static_cast<std::size_t>(layer_index)];
         const bool nvfp4_experts = w13_extents.qtype == QType::NVFP4;
-        const auto expert_index_for_compare = static_cast<std::size_t>(indices[0]);
+        if (device_experts && nvfp4_experts && !skip_experts) {
+            // All eight experts' gate/up and activations in one launch: the slot is a grid dimension
+            // and each block reads its own index from device memory.
+            ops::detail::launch_nvfp4_gather_swiglu_all(
+                vec(s.mlp_in, kHidden), w13_table, expert_slots, kTopK, w13_extents, 4.0F, 25.0F,
+                vec(s.expert_act, kTopK * kInter), stream);
+        }
         for (int j = 0; j < kTopK && !skip_experts; ++j) {
-            if (device_experts && std::getenv("NINFER_INKLING2_COMPARE_EXPERTS") != nullptr &&
-                slot == 0 && j == 0) {
-                // Localises a disagreement instead of guessing at it: the same product through both
-                // routes, compared on the host at the first visit of the token.
-                linear(vec(s.mlp_in, kHidden), matrix_weight(weights, layer.expert_w13[expert_index_for_compare]),
-                       vec(s.concat, 2 * kInter), stream);
-                if (nvfp4_experts) {
-                    ops::detail::launch_nvfp4_gather_gemv(vec(s.mlp_in, kHidden), w13_table,
-                                                          expert_slots, 0, w13_extents,
-                                                          vec(s.gate_up, 2 * kInter), stream);
-                } else {
-                    ops::detail::launch_q8_gather_gemv(vec(s.mlp_in, kHidden), w13_table,
-                                                       expert_slots, 0, w13_extents,
-                                                       vec(s.gate_up, 2 * kInter), stream);
-                }
-                check(cudaStreamSynchronize(stream), "compare wait");
-                std::vector<std::uint16_t> reference(static_cast<std::size_t>(2 * kInter));
-                std::vector<std::uint16_t> gathered_bits(static_cast<std::size_t>(2 * kInter));
-                check(cudaMemcpy(reference.data(), s.concat, reference.size() * 2,
-                                 cudaMemcpyDeviceToHost), "compare reference");
-                check(cudaMemcpy(gathered_bits.data(), s.gate_up, gathered_bits.size() * 2,
-                                 cudaMemcpyDeviceToHost), "compare gathered");
-                std::size_t differing = 0;
-                const auto actual = matrix_weight(weights, layer.expert_w13[expert_index_for_compare]);
-                std::printf("extents n=%d k=%d group=%d divisor=%g layout=%d | actual n=%d k=%d "
-                            "group=%d divisor=%g layout=%d | kInter=%d kHidden=%d\n",
-                            w13_extents.n, w13_extents.k, w13_extents.group,
-                            double(w13_extents.weight_scale_divisor),
-                            static_cast<int>(w13_extents.layout), actual.n, actual.k,
-                            actual.group, double(actual.weight_scale_divisor),
-                            static_cast<int>(actual.layout), kInter, kHidden);
-                std::printf("compare w13 visit 0: direct=%u gathered=%u\n", reference[0],
-                            gathered_bits[0]);
-                for (std::size_t i = 0; i < reference.size(); ++i) {
-                    if (reference[i] != gathered_bits[i]) { ++differing; }
-                }
-                std::printf("compare w13: %zu of %zu values differ\n", differing, reference.size());
-            }
             if (device_experts) {
+                void* act_j = static_cast<char*>(s.expert_act) +
+                              std::size_t(j) * std::size_t(kInter) * 2;
                 if (nvfp4_experts) {
-                    // Gate/up and the activation in one launch: a warp reads both halves of the
-                    // expert's matrix and produces one finished row.
-                    ops::detail::launch_nvfp4_gather_swiglu(
-                        vec(s.mlp_in, kHidden), w13_table, expert_slots, j, w13_extents, 4.0F,
-                        25.0F, vec(s.act, kInter), stream);
+                    // Produced above, for all eight at once.
                 } else {
                     ops::detail::launch_q8_gather_gemv(vec(s.mlp_in, kHidden), w13_table,
                                                        expert_slots, j, w13_extents,
@@ -835,7 +804,7 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
                     // The down product and its weighted accumulate are one launch here: they touch
                     // the same hidden-sized buffer and read the same router weight.
                     ops::detail::launch_nvfp4_gather_accumulate(
-                        vec(s.act, kInter), w2_table, expert_slots, j, w2_extents, routing_scales,
+                        vec(act_j, kInter), w2_table, expert_slots, j, w2_extents, routing_scales,
                         accumulator, stream);
                 } else {
                     ops::detail::launch_q8_gather_accumulate(

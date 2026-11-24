@@ -473,6 +473,26 @@ That is the same shape of problem that the Qwen3.8 path solved by fusing several
 launch, and it is where the next round has to go: the four controller projections, the three
 convolution-state updates, and the norms around them are the candidates.
 
+## 8g14. An aliasing that should work and does not
+
+Two rounds removed copies by turning buffers into views, and the third attempt - making the attention
+input a view of the hidden state on the no-message path - failed at 1 of 5 and was reverted:
+
+    if (messages) { copy(attn_in, message); }        // kept: isolation
+    else          { attn_states = h_in; }            // tried: no copy
+
+On that path nothing obviously writes either buffer: the hidden state is written once at the top of the
+visit, the three input norms only read, and the attention only reads. The values should therefore be
+identical with or without the copy, and they are not.
+
+The honest state is that the writer relationship is not understood. Two guesses were tried - pointing the
+controller inputs at the view, and pointing the k/v bases at it - and both left the oracle at 1 of 5, which
+is the signature of a wrong buffer rather than a rounding difference.
+
+The next step is not another guess: it is a probe. Either compute-sanitizer over one step to see which
+kernel writes past its buffer, or a debug build that checksums h_in across the visit and reports the first
+op after which it changes. Only after that is it worth touching the copy.
+
 ## 8g13. The closed operation budget
 
 Every kind of call a step makes now has a counter, so this list is the whole of it:

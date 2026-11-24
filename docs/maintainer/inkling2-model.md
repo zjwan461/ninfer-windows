@@ -473,6 +473,21 @@ That is the same shape of problem that the Qwen3.8 path solved by fusing several
 launch, and it is where the next round has to go: the four controller projections, the three
 convolution-state updates, and the norms around them are the candidates.
 
+## 8g17. Which of the goal's conditions are met
+
+The goal set two measurable conditions and one that is not measurable here.
+
+| condition | state | evidence |
+|---|---|---|
+| kernels 1585 -> below 800 | **met** | 622 a token, counted in the benchmark's own output |
+| oracle 48 visits at 5 of 5 per step | **met throughout** | worst error 0.84 percent, logits 0.144, top-5 5 of 5 |
+| same-machine rate from 29 toward llama.cpp's 51.4 | **33.5 at the last quiet measurement** | 26.5 at the same load when the work started |
+| rate on the RTX 4080 SUPER | **not obtainable here** | needs the owner's card |
+
+Which is to say: the countable part of the objective is done, and the part that is left is a rate
+measurement on hardware this machine is not. That distinction belongs in the record rather than in a
+claim that the goal is finished.
+
 ## 8g16. Handover state
 
 Where this stands, for whoever picks it up:

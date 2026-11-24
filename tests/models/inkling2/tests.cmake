@@ -43,3 +43,8 @@ ninfer_add_test(ninfer_inkling2_q4_generic_gemv_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_q4_generic_gemv.cpp"
   LIBRARIES ninfer_model_loading ninfer_ops)
 set_tests_properties(ninfer_inkling2_q4_generic_gemv_test PROPERTIES SKIP_RETURN_CODE 77)
+
+ninfer_add_test(ninfer_inkling2_weight_table_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_weight_table.cpp"
+  LIBRARIES ninfer_model_runtime ninfer_ops cudart)
+set_tests_properties(ninfer_inkling2_weight_table_test PROPERTIES SKIP_RETURN_CODE 77)

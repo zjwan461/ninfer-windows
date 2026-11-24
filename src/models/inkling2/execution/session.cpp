@@ -4,6 +4,7 @@
 #include "models/inkling2/execution/weight_table.h"
 #include "ops/linear/nvfp4/nvfp4_launch.h"
 #include "ops/linear/q8/q8_launch.h"
+#include "ops/op_counters.h"
 
 #include "models/inkling2/materialize.h"
 #include "models/inkling2/schedule.h"
@@ -592,15 +593,22 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
             const auto kv_slot = std::size_t(s.options.max_context) * kKvHeads * kHeadDim;
             char* k_base = static_cast<char*>(s.k_cache) + std::size_t(slot) * kv_slot * 2;
             char* v_base = static_cast<char*>(s.v_cache) + std::size_t(slot) * kv_slot * 2;
-            for (int head = 0; head < kKvHeads; ++head) {
-                const auto offset = (std::size_t(head) * s.options.max_context +
-                                     std::size_t(position_now)) * kHeadDim * 2;
-                cudaMemcpyAsync(k_base + offset,
-                                static_cast<char*>(s.k_conv) + std::size_t(head) * kHeadDim * 2,
-                                kHeadDim * 2, cudaMemcpyDeviceToDevice, stream);
-                cudaMemcpyAsync(v_base + offset,
-                                static_cast<char*>(s.v_conv) + std::size_t(head) * kHeadDim * 2,
-                                kHeadDim * 2, cudaMemcpyDeviceToDevice, stream);
+            // One pitched copy per matrix rather than one 256-byte copy per head: the cache is
+            // [head][position][dim] and the source is [head][dim], which is exactly a 2D copy with
+            // the two pitches. The per-head version made sixteen driver calls a visit, seven
+            // hundred a token, to move eight kilobytes.
+            {
+                const auto cache_pitch = std::size_t(s.options.max_context) * kHeadDim * 2;
+                const auto first_offset = std::size_t(position_now) * kHeadDim * 2;
+                check(cudaMemcpy2DAsync(k_base + first_offset, cache_pitch, s.k_conv,
+                                        std::size_t(kHeadDim) * 2, std::size_t(kHeadDim) * 2,
+                                        std::size_t(kKvHeads), cudaMemcpyDeviceToDevice, stream),
+                      "kv store k");
+                check(cudaMemcpy2DAsync(v_base + first_offset, cache_pitch, s.v_conv,
+                                        std::size_t(kHeadDim) * 2, std::size_t(kHeadDim) * 2,
+                                        std::size_t(kKvHeads), cudaMemcpyDeviceToDevice, stream),
+                      "kv store v");
+                ninfer::ops::op_counters().kv_store.fetch_add(1, std::memory_order_relaxed);
             }
             RelBiasAttentionArgs args;
             args.heads = kHeads; args.kv_heads = kKvHeads; args.head_dim = kHeadDim;

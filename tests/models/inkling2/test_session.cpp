@@ -146,9 +146,10 @@ int main(int argc, char** argv) {
             const double accumulate_ops = double(counters.accumulate.load()) / bench_steps;
             const double swiglu_ops = double(counters.swiglu.load()) / bench_steps;
             std::printf("ops/token: linear %.0f, expert gemv %.0f, swiglu %.0f, accumulate %.0f"
-                        " -> total %.0f\n",
+                        " -> total %.0f, kv store %.0f\n",
                         linear_ops, gemv_ops, swiglu_ops, accumulate_ops,
-                        linear_ops + gemv_ops + swiglu_ops + accumulate_ops);
+                        linear_ops + gemv_ops + swiglu_ops + accumulate_ops,
+                        double(counters.kv_store.load()) / bench_steps);
             std::cout << "host " << (host_seconds / bench_steps * 1e3) << " ms/token, wall "
                       << (seconds / bench_steps * 1e3) << " ms/token\n";
             std::cout << "session bench: " << bench_steps << " steps in " << seconds << " s -> "

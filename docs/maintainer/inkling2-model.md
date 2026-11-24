@@ -422,6 +422,19 @@ Which means the next lever is the operations rather than the copies: 681 `linear
 of them per visit being the query, key and value projections from one input, and two more being the
 sink and gate projections from another.
 
+## 8g12. The conv states want two buffers, not a copy
+
+Each visit advances three convolution states through `state_scratch` and copies the result back into the
+state array: 144 copies a token, about 4.6 KB each. The operation cannot write in place because it reads
+the old state as its input.
+
+The fix needs no new kernel. Allocate each per-visit state twice over and let the token position's parity
+decide which half this step reads and which it writes; step p reads buffer p&1 and writes its complement,
+nothing is copied, and reset zeroes both halves.
+
+Not started, because the edit touches four allocations, three call sites and the reset, which is more than
+belongs at the end of a session. The next round begins here.
+
 ## 8g11. The wattage says the GPU is idle
 
 nvidia-smi during a benchmark: **120 W of a 500 W cap**, GPU-Util reading zero for most samples. The same

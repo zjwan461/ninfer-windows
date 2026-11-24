@@ -6,11 +6,13 @@
 #include <cmath>
 #include <stdexcept>
 #include <string>
+#include "ops/op_counters.h"
 
 namespace ninfer::ops {
 
 void softcapped_swiglu(const Tensor& gate_up, float gate_cap, float up_cap, Tensor& out,
                        cudaStream_t stream) {
+    ninfer::ops::op_counters().swiglu.fetch_add(1, std::memory_order_relaxed);
     if (gate_up.dtype != DType::BF16 || out.dtype != DType::BF16) {
         throw std::invalid_argument("softcapped_swiglu: gate_up/out must be BF16");
     }

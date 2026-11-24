@@ -782,16 +782,18 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
             }
             if (device_experts) {
                 if (nvfp4_experts) {
-                    ops::detail::launch_nvfp4_gather_gemv(vec(s.mlp_in, kHidden), w13_table,
-                                                          expert_slots, j, w13_extents,
-                                                          vec(s.gate_up, 2 * kInter), stream);
+                    // Gate/up and the activation in one launch: a warp reads both halves of the
+                    // expert's matrix and produces one finished row.
+                    ops::detail::launch_nvfp4_gather_swiglu(
+                        vec(s.mlp_in, kHidden), w13_table, expert_slots, j, w13_extents, 4.0F,
+                        25.0F, vec(s.act, kInter), stream);
                 } else {
                     ops::detail::launch_q8_gather_gemv(vec(s.mlp_in, kHidden), w13_table,
                                                        expert_slots, j, w13_extents,
                                                        vec(s.gate_up, 2 * kInter), stream);
+                    softcapped_swiglu(vec(s.gate_up, 2 * kInter), 4.0F, 25.0F, vec(s.act, kInter),
+                                      stream);
                 }
-                softcapped_swiglu(vec(s.gate_up, 2 * kInter), 4.0F, 25.0F, vec(s.act, kInter),
-                                  stream);
                 if (nvfp4_experts) {
                     // The down product and its weighted accumulate are one launch here: they touch
                     // the same hidden-sized buffer and read the same router weight.

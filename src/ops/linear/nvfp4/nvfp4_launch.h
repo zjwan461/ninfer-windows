@@ -19,6 +19,10 @@ void launch_nvfp4_gather_accumulate(const Tensor& x, const Weight* table,
                                     const std::int32_t* slots, int slot, const Weight& extents,
                                     const float* scales, Tensor& acc, cudaStream_t stream);
 
+void launch_nvfp4_gather_swiglu(const Tensor& x, const Weight* table, const std::int32_t* slots,
+                                int slot, const Weight& extents, float gate_cap, float up_cap,
+                                Tensor& out, cudaStream_t stream);
+
 void launch_nvfp4_generic_gemv(const Tensor& x, const Weight& weight, Tensor& out,
                                cudaStream_t stream);
 

@@ -9,6 +9,7 @@ target_sources(ninfer_ops PRIVATE
   "${CMAKE_CURRENT_LIST_DIR}/shapes/n2304_k2304.cu"
   "${CMAKE_CURRENT_LIST_DIR}/shapes/n5120_k17408.cu"
   "${CMAKE_CURRENT_LIST_DIR}/generic_gemv.cu"
+  "${CMAKE_CURRENT_LIST_DIR}/gather_swiglu.cu"
 )
 
 # Fork-local: the non-RDC NVFP4 archive exists only for sm_120a.

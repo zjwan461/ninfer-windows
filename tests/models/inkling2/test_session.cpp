@@ -141,10 +141,14 @@ int main(int argc, char** argv) {
             const double seconds = std::chrono::duration<double>(end - begin).count();
             if (graph_exec != nullptr) { cudaGraphExecDestroy(graph_exec); }
             auto& counters = ninfer::ops::op_counters();
-            std::printf("ops/token: linear %.0f, expert gemv %.0f, accumulate %.0f\n",
-                        double(counters.linear.load()) / bench_steps,
-                        double(counters.expert_gemv.load()) / bench_steps,
-                        double(counters.accumulate.load()) / bench_steps);
+            const double linear_ops = double(counters.linear.load()) / bench_steps;
+            const double gemv_ops = double(counters.expert_gemv.load()) / bench_steps;
+            const double accumulate_ops = double(counters.accumulate.load()) / bench_steps;
+            const double swiglu_ops = double(counters.swiglu.load()) / bench_steps;
+            std::printf("ops/token: linear %.0f, expert gemv %.0f, swiglu %.0f, accumulate %.0f"
+                        " -> total %.0f\n",
+                        linear_ops, gemv_ops, swiglu_ops, accumulate_ops,
+                        linear_ops + gemv_ops + swiglu_ops + accumulate_ops);
             std::cout << "host " << (host_seconds / bench_steps * 1e3) << " ms/token, wall "
                       << (seconds / bench_steps * 1e3) << " ms/token\n";
             std::cout << "session bench: " << bench_steps << " steps in " << seconds << " s -> "
@@ -231,6 +235,7 @@ int main(int argc, char** argv) {
             std::printf("gather: %.1f us/call, %.0f GB/s, %.2f MB per call\n",
                         gather_seconds / kCalls * 1e6, bytes * kCalls / gather_seconds / 1e9,
                         bytes / 1e6);
+
             cudaFree(output);
             cudaFree(input);
             cudaFree(device_slots);

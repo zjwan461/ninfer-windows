@@ -11,6 +11,7 @@ struct OpCounters {
     std::atomic<long> linear{0};
     std::atomic<long> expert_gemv{0};
     std::atomic<long> accumulate{0};
+    std::atomic<long> swiglu{0};
 };
 
 inline OpCounters& op_counters() {

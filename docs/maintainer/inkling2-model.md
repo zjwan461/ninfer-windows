@@ -245,6 +245,23 @@ of NVFP4 for the loop core's twelve layers and 5.38 GiB of q8 for the coda's fou
 A Q3 format would go further, but it means a codec, a kernel and their tests; the numbers above
 say it is not needed for the 16 GB target, so it stays unbuilt.
 
+## 8g. Where the decode time actually goes
+
+Measured, in this order, each one killing the previous theory:
+
+| Probe | Result |
+|---|---|
+| skip the 48 routing readbacks | +2% |
+| skip all 768 expert GEMVs | +21% |
+| launch overhead, measured directly | 4.49 us per launch, 0.89 per graph node |
+| host time vs wall time, with the readbacks | 42.14 vs 42.17 ms/token |
+| host time vs wall time, readbacks removed | 40.89 vs 41.16 ms/token |
+
+The last two are the answer. With every synchronisation removed the host still spends its time
+queueing, and the wall time is the same number, so the token is **host-bound**: roughly 1,400
+operations per token at 4.49 us of launch each is 6 ms, which leaves about 25 us per operation of
+C++ work. That is the thing to fix, and it is not arithmetic, not bandwidth, and not synchronisation.
+
 ## 8f. How far ahead this engine is supposed to be
 
 The engine has a recorded head-to-head on a card of this class (`docs/llamacpp-comparison.md`,

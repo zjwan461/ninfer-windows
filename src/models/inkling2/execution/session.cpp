@@ -600,10 +600,11 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
             Tensor v_heads_out(s.v_clip, DType::BF16, {kHeadDim, kKvHeads});
             head_rmsnorm(v_heads_in, kEps, v_heads_out, stream);
         }
-        copy_counted(s.v_conv, s.v_clip, kKv * 2, cudaMemcpyDeviceToDevice, stream);
+        // The normalised values are what the cache stores, so the copy back is not needed either.
+        void* v_states = s.v_clip;
         if (stage_sink) {
             stage_sink(layer_index, "k", k_states, kKv);
-            stage_sink(layer_index, "v", s.v_conv, kKv);
+            stage_sink(layer_index, "v", v_states, kKv);
         }
 
         // ---- relative states, sink, gate -------------------------------------------------
@@ -638,7 +639,7 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
                                         std::size_t(kHeadDim) * 2, std::size_t(kHeadDim) * 2,
                                         std::size_t(kKvHeads), cudaMemcpyDeviceToDevice, stream),
                       "kv store k");
-                check(cudaMemcpy2DAsync(v_base + first_offset, cache_pitch, s.v_conv,
+                check(cudaMemcpy2DAsync(v_base + first_offset, cache_pitch, v_states,
                                         std::size_t(kHeadDim) * 2, std::size_t(kHeadDim) * 2,
                                         std::size_t(kKvHeads), cudaMemcpyDeviceToDevice, stream),
                       "kv store v");

@@ -136,6 +136,7 @@ struct Session::Impl {
     void* ones = nullptr;
     void* indices = nullptr;
     void* router_weights = nullptr;
+    void* routing_host = nullptr;  // pinned: the readback is 64 bytes and pageable copies stage
     void* position = nullptr;
     void* previous_h = nullptr;
     void* previous_block = nullptr;
@@ -226,6 +227,10 @@ Session::Session(TextWeights& weights, const Config& config, DeviceContext& devi
     s.ones = allocate(std::size_t(kKv) * 2);
     s.indices = allocate(std::size_t(kTopK) * sizeof(std::int32_t));
     s.router_weights = allocate(std::size_t(kTopK) * sizeof(float));
+    // The selection is the one readback a step keeps, so its host buffer is pinned: a pageable
+    // device-to-host copy stages through the driver and cannot overlap the transfer.
+    check(cudaMallocHost(&s.routing_host, std::size_t(kTopK) * (sizeof(std::int32_t) + sizeof(float))),
+          "routing host");
     s.position = allocate(sizeof(std::int32_t));
     s.previous_h = allocate(hidden_bytes);
     s.previous_block = allocate(hidden_bytes);
@@ -284,6 +289,7 @@ Session::~Session() {
                           s.attn_state, s.mlp_state, s.state_scratch}) {
         if (pointer != nullptr) { cudaFree(pointer); }
     }
+    if (s.routing_host != nullptr) { cudaFreeHost(s.routing_host); }
     for (void* pointer : s.router_f32) {
         if (pointer != nullptr) { cudaFree(pointer); }
     }
@@ -634,12 +640,20 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
         moe_router(vec(s.mlp_in, kHidden), gate_matrix, gate_bias, kTopK, 8.0F, router_out,
                    router_weights, stream);
         // The selection picks weight slots on the host, so this is the one readback a step keeps.
+        auto* routing_host = static_cast<char*>(s.routing_host);
+        check(cudaMemcpyAsync(routing_host, s.indices, std::size_t(kTopK) * sizeof(std::int32_t),
+                              cudaMemcpyDeviceToHost, stream), "routing indices");
+        check(cudaMemcpyAsync(routing_host + std::size_t(kTopK) * sizeof(std::int32_t),
+                              s.router_weights, std::size_t(kTopK) * sizeof(float),
+                              cudaMemcpyDeviceToHost, stream), "routing weights");
+        // The experts cannot start until the host knows which ones, so this drain stays; the copy
+        // itself no longer stages through a pageable buffer.
+        check(cudaStreamSynchronize(stream), "routing wait");
         std::vector<std::int32_t> indices(static_cast<std::size_t>(kTopK));
         std::vector<float> routing(static_cast<std::size_t>(kTopK));
-        check(cudaMemcpy(indices.data(), s.indices, indices.size() * sizeof(std::int32_t),
-                         cudaMemcpyDeviceToHost), "routing indices");
-        check(cudaMemcpy(routing.data(), s.router_weights, routing.size() * sizeof(float),
-                         cudaMemcpyDeviceToHost), "routing weights");
+        std::memcpy(indices.data(), routing_host, indices.size() * sizeof(std::int32_t));
+        std::memcpy(routing.data(), routing_host + std::size_t(kTopK) * sizeof(std::int32_t),
+                    routing.size() * sizeof(float));
         if (routing_hook) { routing_hook(slot, indices, routing); }
         Tensor accumulator(s.moe_acc, DType::FP32, {kHidden, 1});
         check(cudaMemsetAsync(s.moe_acc, 0, std::size_t(kHidden) * 4, stream), "moe clear");

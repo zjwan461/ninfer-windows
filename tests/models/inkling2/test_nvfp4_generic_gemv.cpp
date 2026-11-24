@@ -172,6 +172,61 @@ int main(int argc, char** argv) {
                 cudaFree(table);
             }
 
+            // The down matrix is a different geometry (hidden x inter, not 2*inter x hidden) and it
+            // was the one the session's device path got wrong, so it is checked against its own
+            // fixture rather than assumed to follow the gate/up case.
+            {
+                const auto w2 = read_bf16(fixture / ("expert_" + std::to_string(slot) + "_w2.bin"));
+                std::vector<double> expected_down(2304, 0.0);
+                std::vector<std::uint16_t> ones_input(1152, 0x3F80);  // 1.0 in BF16
+                for (int row = 0; row < 2304; ++row) {
+                    double accumulator = 0.0;
+                    for (int kk = 0; kk < 1152; ++kk) {
+                        accumulator += double(from_bf16(w2[std::size_t(row) * 1152 + kk]));
+                    }
+                    expected_down[std::size_t(row)] = accumulator;
+                }
+                void* d_ones = nullptr;
+                cudaMalloc(&d_ones, 1152 * 2);
+                cudaMemcpy(d_ones, ones_input.data(), 1152 * 2, cudaMemcpyHostToDevice);
+                void* d_down = nullptr;
+                cudaMalloc(&d_down, 2304 * 2);
+                void* down_table = nullptr;
+                cudaMalloc(&down_table, sizeof(ninfer::Weight));
+                const auto down_weight =
+                    models::inkling2::matrix_weight(weights, layer.expert_w2[expert]);
+                cudaMemcpy(down_table, &down_weight, sizeof(ninfer::Weight), cudaMemcpyHostToDevice);
+                void* d_zero = nullptr;
+                cudaMalloc(&d_zero, sizeof(std::int32_t));
+                cudaMemset(d_zero, 0, sizeof(std::int32_t));
+                ninfer::Tensor t_ones(d_ones, ninfer::DType::BF16, {1152, 1});
+                ninfer::Tensor t_down(d_down, ninfer::DType::BF16, {2304, 1});
+                ninfer::ops::detail::launch_nvfp4_gather_gemv(
+                    t_ones, static_cast<const ninfer::Weight*>(down_table),
+                    static_cast<const std::int32_t*>(d_zero), 0, down_weight, t_down, nullptr);
+                if (cudaDeviceSynchronize() != cudaSuccess) {
+                    std::cerr << "FAIL: down gather: " << cudaGetErrorString(cudaGetLastError())
+                              << "\n";
+                    return 1;
+                }
+                std::vector<std::uint16_t> down_out(2304);
+                cudaMemcpy(down_out.data(), d_down, 2304 * 2, cudaMemcpyDeviceToHost);
+                double down_error = 0.0;
+                for (std::size_t i = 0; i < down_out.size(); ++i) {
+                    down_error = std::max(down_error, std::fabs(double(from_bf16(down_out[i])) -
+                                                                expected_down[i]));
+                }
+                std::cout << "expert " << expert << " down max|err| " << down_error << "\n";
+                if (down_error > 0.05) {
+                    std::cerr << "FAIL: down gather max|err| " << down_error << "\n";
+                    return 1;
+                }
+                cudaFree(d_zero);
+                cudaFree(down_table);
+                cudaFree(d_down);
+                cudaFree(d_ones);
+            }
+
             double local = 0.0;
             for (std::size_t i = 0; i < got.size(); ++i) {
                 const double error = std::fabs(double(from_bf16(got[i])) - expected[i]);

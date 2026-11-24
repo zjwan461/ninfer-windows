@@ -704,7 +704,17 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
             probe_indices = indices;
             probe_routing = routing;
         }
-        if (routing_hook) { routing_hook(slot, indices, routing); }
+        if (routing_hook) {
+            routing_hook(slot, indices, routing);
+            // The hook may have replaced the selection (the parity harness pins it to the oracle),
+            // and the device path reads the selection from device memory, so a pinned choice has to
+            // be written back or the two disagree.
+            check(cudaMemcpyAsync(s.indices, indices.data(),
+                                  indices.size() * sizeof(std::int32_t), cudaMemcpyHostToDevice,
+                                  stream), "pinned indices");
+            check(cudaMemcpyAsync(s.router_weights, routing.data(), routing.size() * sizeof(float),
+                                  cudaMemcpyHostToDevice, stream), "pinned weights");
+        }
         Tensor accumulator(s.moe_acc, DType::FP32, {kHidden, 1});
         check(cudaMemsetAsync(s.moe_acc, 0, std::size_t(kHidden) * 4, stream), "moe clear");
         // The matching probe for the other half of the question: skip the routed experts entirely

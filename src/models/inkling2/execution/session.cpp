@@ -450,6 +450,11 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
 
         // ---- attention input: read out of the block stack -----------------------------------
         const int queries = sliding ? 1 : 3;
+        // The controller inputs are views: with messages each is its own buffer, otherwise all three
+        // alias the attention input.
+        void* q_in_states = s.q_in;
+        void* k_in_states = s.k_in;
+        void* v_in_states = s.v_in;
         if (layer_index > 0) {
             copy_counted(static_cast<char*>(s.stack) + stack_length_now * kHidden * 2, s.h_in,
                             kHidden * 2, cudaMemcpyDeviceToDevice, stream);
@@ -513,10 +518,13 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
             message_gate(layer, Role::ControllerVDown, Role::ControllerVForget,
                          Role::ControllerVGain, v_base, rows + 2 * kHidden * 2, s.v_in);
         } else {
-            copy_counted(s.q_in, s.attn_in, kHidden * 2, cudaMemcpyDeviceToDevice, stream);
+            // Without messages nothing writes these three, so they are views of the attention input
+            // rather than copies of it. With messages each controller writes its own, which is why the
+            // copies are only removed here.
+            q_in_states = s.attn_in;
             if (queries == 1) {
-                copy_counted(s.k_in, s.attn_in, kHidden * 2, cudaMemcpyDeviceToDevice, stream);
-                copy_counted(s.v_in, s.attn_in, kHidden * 2, cudaMemcpyDeviceToDevice, stream);
+                k_in_states = s.attn_in;
+                v_in_states = s.attn_in;
             }
         }
 
@@ -528,7 +536,7 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
             const auto k_gain = dense_tensor(weights, layer[sliding ? Role::AttnNorm : Role::KInputNorm]);
             const auto v_gain = dense_tensor(weights, layer[sliding ? Role::AttnNorm : Role::VInputNorm]);
             ops::detail::rmsnorm_triple_launch(
-                vec(s.q_in, kHidden), vec(s.k_in, kHidden), vec(s.v_in, kHidden),
+                vec(q_in_states, kHidden), vec(k_in_states, kHidden), vec(v_in_states, kHidden),
                 Tensor(q_gain.data, DType::BF16, {kHidden}), Tensor(k_gain.data, DType::BF16, {kHidden}),
                 Tensor(v_gain.data, DType::BF16, {kHidden}), vec(s.qn, kHidden), vec(s.kn, kHidden),
                 vec(s.vn, kHidden), kEps, stream);

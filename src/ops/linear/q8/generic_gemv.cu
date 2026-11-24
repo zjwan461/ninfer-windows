@@ -65,4 +65,52 @@ void launch_q8_generic_gemv(const Tensor& x, const Weight& weight, Tensor& out,
     CUDA_CHECK(cudaGetLastError());
 }
 
+// The same route with the weight and the slot taken from device memory, so the coda's experts can
+// be selected without the host learning which ones.
+__global__ void q8_gather_gemv_kernel(const __nv_bfloat16* __restrict__ x,
+                                      const Weight* __restrict__ table,
+                                      const std::int32_t* __restrict__ slots, int slot,
+                                      __nv_bfloat16* __restrict__ out, int rows, int k) {
+    const int warps_per_block = blockDim.x / 32;
+    const int row = blockIdx.x * warps_per_block + threadIdx.x / 32;
+    if (row >= rows) { return; }
+    const Weight weight = table[slots[slot]];
+    const auto* codes = static_cast<const std::int8_t*>(weight.qdata);
+    const auto* scales = static_cast<const std::uint16_t*>(weight.scales);
+    const int lane = threadIdx.x % 32;
+    const int groups = k / kGroup;
+    const std::int8_t* code_row = codes + std::int64_t(row) * k;
+    const std::uint16_t* scale_row = scales + std::int64_t(row) * groups;
+
+    float accumulator = 0.0F;
+    for (int group = lane; group < groups; group += 32) {
+        const float scale = __half2float(__ushort_as_half(scale_row[group]));
+        float partial = 0.0F;
+        for (int i = 0; i < kGroup; ++i) {
+            const int index = group * kGroup + i;
+            partial += float(code_row[index]) * __bfloat162float(x[index]);
+        }
+        accumulator += scale * partial;
+    }
+#pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        accumulator += __shfl_xor_sync(0xffffffffu, accumulator, offset);
+    }
+    if (lane == 0) { out[row] = __float2bfloat16(accumulator); }
+}
+
+void launch_q8_gather_gemv(const Tensor& x, const Weight* table, const std::int32_t* slots,
+                           int slot, const Weight& extents, Tensor& out, cudaStream_t stream) {
+    const int rows = extents.n;
+    const int k = extents.k;
+    if (rows <= 0 || k <= 0 || (k % kGroup) != 0) { return; }
+    constexpr int kThreads = 256;
+    const int warps = kThreads / 32;
+    const auto blocks = static_cast<unsigned>((rows + warps - 1) / warps);
+    q8_gather_gemv_kernel<<<blocks, kThreads, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(x.data), table, slots, slot,
+        static_cast<__nv_bfloat16*>(out.data), rows, k);
+    CUDA_CHECK(cudaGetLastError());
+}
+
 } // namespace ninfer::ops::detail

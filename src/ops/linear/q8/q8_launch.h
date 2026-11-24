@@ -25,6 +25,9 @@ void launch_q8_mma_r64x32_c64_k128_a1(const Tensor&, const Weight&, Tensor&, cud
 
 
 // Runtime-extent q8 decode route for shapes without a tuned kernel.
+void launch_q8_gather_gemv(const Tensor& x, const Weight* table, const std::int32_t* slots,
+                           int slot, const Weight& extents, Tensor& out, cudaStream_t stream);
+
 void launch_q8_generic_gemv(const Tensor& x, const Weight& weight, Tensor& out,
                             cudaStream_t stream);
 

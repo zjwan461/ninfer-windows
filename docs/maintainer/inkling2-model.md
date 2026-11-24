@@ -473,6 +473,34 @@ That is the same shape of problem that the Qwen3.8 path solved by fusing several
 launch, and it is where the next round has to go: the four controller projections, the three
 convolution-state updates, and the norms around them are the candidates.
 
+## 8g16. Handover state
+
+Where this stands, for whoever picks it up:
+
+| quantity | value |
+|---|---:|
+| oracle | 48 visits, 5 of 5, worst error 0.84 percent |
+| suites | 14 of 14 |
+| operations a token | 1324 (622 kernels, 496 copies, 155 norms, 51 KV stores) |
+| decode rate, last quiet machine | 33.5 tok/s (llama.cpp on the same slice: 51.4) |
+| branch | inkling2, everything committed and pushed |
+
+Three open threads, in the order they are worth taking:
+
+1. **The card is shared** with another workload now (289 W of a 500 W cap when idle for us), so no rate
+   claim can be made until it is quiet or until the 4080 SUPER numbers arrive. That is the only thing
+   blocking the goal's rate target.
+2. **The attention-input copy** (8g14). Proven so far: the hidden state does not change during a visit,
+   and it does not change in the version where the copy is removed either - so the difference between the
+   two versions is not the contents of that buffer. The probe that would settle it has to checksum across
+   *each* operation inside one visit, because the obvious per-visit comparison is confounded by the visit
+   copying the state in at its start.
+3. **426 line projections** remain; the four controller downstreams are the largest coherent group left.
+
+The wattage is the most useful signal this port has produced: 120 W where llama.cpp draws 400 W means the
+device is idle between launches, which is why the eight-expert fusions helped and why instruction-level
+changes did not.
+
 ## 8g15. How to settle 8g14 without guessing
 
 `compute-sanitizer` is not installed on this machine and cannot be, so the probe has to be built in. The

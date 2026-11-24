@@ -335,6 +335,26 @@ the expert part of the budget from 864 to about 150.
 
 Measured with the GPU free: 25.3 / 21.8 / 24.5 tok/s launched, 28.9 / 29.0 captured.
 
+## 8g6. Stacking the experts, and the obstacle that has to be decided first
+
+The plan from §8g4 is one stacked bank per layer, expert `e` a row span. Checking it against the
+container turns up one real obstacle before any code is written: **the NVFP4 container carries one
+amortisation divisor per object**, and this checkpoint's divisor is per expert - 22192.8 for one and
+18888 for the next in the same layer. A single bank has one divisor field, so stacking as-is would
+scale 127 of 128 experts wrongly.
+
+Two ways out, and they differ in what they cost:
+
+1. **Fold the divisor into the block scales.** Exact in principle - rescale every E4M3 block scale by
+   the ratio and the bank has one divisor - but it re-quantises the scales, and the container stores
+   scales as E4M3, so the ratio has to survive a 4-bit-mantissa rounding.
+2. **A divisor vector beside the bank.** Keep the bank's own divisor at 1.0 and emit a 128-element
+   fp32 tensor per layer that the kernel reads by expert index. No re-quantisation at all, one extra
+   tiny tensor, and the kernel already has the expert index in hand.
+
+The second is the one to build: it costs a 512-byte tensor per layer and changes no arithmetic. That
+matters because the point of this change is the memory layout, and it should not also move the numbers.
+
 ## 8g4. What the A3B MoE path teaches, even though it cannot be reused
 
 The engine already has a fused sparse-MoE op (`ops::sparse_moe`), and reading it is worth more than

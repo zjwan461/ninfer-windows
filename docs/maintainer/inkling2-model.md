@@ -131,6 +131,33 @@ used, or every comparison is meaningless: the block states, the attention inputs
 all belong to a different prompt. `--token-id 1234` is the token the current oracle was recorded
 with; `layer0.in_00` matching `visit_in_0` exactly is the check that it is the right one.
 
+## 9d. Runbook: measuring on an RTX 4080 SUPER
+
+The 32 GB card holds the pass-through artifact as it stands, so nothing has to be re-converted.
+Build with the card's architecture and run the session test:
+
+```
+cmake -S . -B build -DNINFER_CUDA_ARCHITECTURES=89 -DNINFER_TARGET_SM_COUNT=76 \
+      -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target ninfer_inkling2_session_test -j
+
+# steady-state decode rate, warm-up reported separately
+build/tests/ninfer_inkling2_session_test \
+    --artifact inkling2-mini.ninfer --prompt-ids 1234 --generate 32
+
+# pipelined rate, 48 visits per step
+build/tests/ninfer_inkling2_session_test --artifact inkling2-mini.ninfer --bench 128
+```
+
+Two numbers come back and both are wanted: the steady-state ms/token and the pipelined tok/s. The
+first is what a user feels, the second is what the kernels do. On the 78-SM slice used during
+development they are 41-65 ms/token and 16-18 tok/s, with about twenty percent run-to-run spread on
+that shared machine; a dedicated card should be both faster and steadier.
+
+The accuracy check needs the recorded oracle and is worth running on the same binary:
+`--artifact ... --oracle <dir>` prints the worst visit against the 48-visit recording and the
+logits error, and fails if either leaves the BF16 noise floor.
+
 ## 9c. The compact recipe, measured
 
 `--compact` requantises the coda's four layers of experts from q8 to q4, which is the one lever

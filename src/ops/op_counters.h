@@ -14,6 +14,7 @@ struct OpCounters {
     std::atomic<long> swiglu{0};
     std::atomic<long> kv_store{0};
     std::atomic<long> device_copy{0};
+    std::atomic<long> norm{0};
 };
 
 inline OpCounters& op_counters() {

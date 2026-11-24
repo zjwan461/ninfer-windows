@@ -4,6 +4,7 @@
 #include "models/inkling2/execution/weight_table.h"
 #include "ops/linear/nvfp4/nvfp4_launch.h"
 #include "ops/linear/bf16/bf16_launch.h"
+#include "ops/launcher/head_rmsnorm.h"
 #include "ops/linear/q8/q8_launch.h"
 #include "ops/op_counters.h"
 
@@ -396,9 +397,9 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
         // The gate reads both normalised streams side by side, so the two norms write straight into
         // the two halves of the buffer rather than into their own and then being copied: same
         // result, two fewer operations per message visit, and no hidden-sized buffer to overrun.
-        auto* concat_second = static_cast<char*>(s.concat) + kHidden * 2;
-        head_rmsnorm(vec(x, kHidden), kEps, vec(s.concat, kHidden), stream);
-        head_rmsnorm(vec(message, kHidden), kEps, vec(concat_second, kHidden), stream);
+        // Both streams normalised by one launch into the two halves of the buffer the gate projects.
+        ops::detail::rmsnorm_dual_launch(vec(x, kHidden), vec(message, kHidden),
+                                         vec(s.concat, 2 * kHidden), kEps, stream);
         linear(vec(s.concat, 2 * kHidden), matrix_weight(weights, layer[down]),
                vec(s.controller, 64), stream);
         // The two gates read the same 64-wide controller state, so they are one launch.

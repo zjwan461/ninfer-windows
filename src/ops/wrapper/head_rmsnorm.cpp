@@ -6,10 +6,12 @@
 #include <cmath>
 #include <stdexcept>
 #include <string>
+#include "ops/op_counters.h"
 
 namespace ninfer::ops {
 
 void head_rmsnorm(const Tensor& x, float eps, Tensor& out, cudaStream_t stream) {
+    ninfer::ops::op_counters().norm.fetch_add(1, std::memory_order_relaxed);
     if (x.dtype != DType::BF16 || out.dtype != DType::BF16) {
         throw std::invalid_argument("head_rmsnorm: x/out must be BF16");
     }

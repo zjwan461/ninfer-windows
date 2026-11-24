@@ -376,6 +376,18 @@ The GGUF is Q4_K_M at 15.46 GiB against this artifact's 18.33 GiB of NVFP4, so t
 between two four-bit-ish recipes rather than like for like; it is still the right target, because
 the user cares about tokens per second on the same question.
 
+## 8b2. When this machine cannot measure anything
+
+The shared slice used for development is not always usable for timing, and it is worth writing down
+how bad it gets so nobody reads a number from it without checking first. Under a load average of
+about 40, two runs of the *same* binary, back to back, gave 9.1 and 3.8 tok/s - a factor of 2.4 - and
+a host time of 109 ms against 262 ms for identical work.
+
+The rule that follows: check `uptime` before timing, take the host/wall ratio as the load-independent
+signal, and never conclude anything from a single run on this machine. Several rounds of this port
+were spent on changes that were then reverted for exactly this reason, which is cheaper than keeping
+a change nobody can justify.
+
 ## 8d. Decode rate, and how it moves
 
 `--generate` reports the two numbers separately, because averaging them is misleading:

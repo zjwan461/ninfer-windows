@@ -794,15 +794,17 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
                 softcapped_swiglu(vec(s.gate_up, 2 * kInter), 4.0F, 25.0F, vec(s.act, kInter),
                                   stream);
                 if (nvfp4_experts) {
-                    ops::detail::launch_nvfp4_gather_gemv(vec(s.act, kInter), w2_table, expert_slots,
-                                                          j, w2_extents, vec(s.down, kHidden),
-                                                          stream);
+                    // The down product and its weighted accumulate are one launch here: they touch
+                    // the same hidden-sized buffer and read the same router weight.
+                    ops::detail::launch_nvfp4_gather_accumulate(
+                        vec(s.act, kInter), w2_table, expert_slots, j, w2_extents, routing_scales,
+                        accumulator, stream);
                 } else {
                     ops::detail::launch_q8_gather_gemv(vec(s.act, kInter), w2_table, expert_slots, j,
                                                        w2_extents, vec(s.down, kHidden), stream);
+                    axpy_bf16_into_f32_device_scale(accumulator, vec(s.down, kHidden), routing_scales,
+                                                    j, stream);
                 }
-                axpy_bf16_into_f32_device_scale(accumulator, vec(s.down, kHidden), routing_scales, j,
-                                                stream);
                 continue;
             }
             const auto expert = static_cast<std::size_t>(indices[static_cast<std::size_t>(j)]);

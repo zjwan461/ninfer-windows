@@ -121,38 +121,52 @@ int main(int argc, char** argv) {
             void* device_arg = nullptr;
             cudaMalloc(&device_arg, sizeof(std::int32_t));
             Tensor argmax_out(device_arg, DType::I32, {1});
+            int generated_count = 0;
             double step_seconds = 0.0;
+            double warmup_seconds = 0.0;
             double argmax_seconds = 0.0;
             const auto argmax_of = [&](std::uint32_t input) {
                 const auto step_begin = std::chrono::steady_clock::now();
                 const auto logits_now = session.step(input, nullptr);
                 cudaDeviceSynchronize();
                 const auto step_end = std::chrono::steady_clock::now();
-                step_seconds += std::chrono::duration<double>(step_end - step_begin).count();
+                const double this_step = std::chrono::duration<double>(step_end - step_begin).count();
+                step_seconds += this_step;
+                if (generated_count == 0) { warmup_seconds = this_step; }
                 ops::argmax(logits_now, argmax_out, logits_now.ne[0], nullptr);
                 std::int32_t best = 0;
                 cudaMemcpy(&best, device_arg, sizeof(best), cudaMemcpyDeviceToHost);
                 const auto argmax_end = std::chrono::steady_clock::now();
                 argmax_seconds += std::chrono::duration<double>(argmax_end - step_end).count();
+                std::cout << "  token " << generated_count << " step "
+                          << std::chrono::duration<double>(step_end - step_begin).count() * 1e3
+                          << " ms\n";
+                ++generated_count;
                 return static_cast<std::uint32_t>(best);
             };
-            const auto begin = std::chrono::steady_clock::now();
+            // The first step pays for the CUDA context, the module load and the first touch of
+            // every weight, which is about a second. It is reported separately rather than
+            // averaged into the rate.
             std::vector<std::uint32_t> generated;
             for (int i = 0; i < generate_steps; ++i) {
                 pending = argmax_of(pending);
                 generated.push_back(pending);
             }
             cudaDeviceSynchronize();
-            const auto end = std::chrono::steady_clock::now();
-            const double seconds = std::chrono::duration<double>(end - begin).count();
+            const double seconds = step_seconds;
+            const double steady_seconds = step_seconds - warmup_seconds;
+            const int steady_tokens = generate_steps - 1;
             std::cout << "prompt:";
             for (auto id : prompt_ids) { std::cout << " " << id; }
             std::cout << "\ngenerated:";
             for (auto id : generated) { std::cout << " " << id; }
-            std::cout << "  step " << (step_seconds / generate_steps * 1e3) << " ms, argmax "
-                      << (argmax_seconds / generate_steps * 1e3) << " ms per token\n";
-            std::cout << "\n" << generate_steps << " tokens in " << seconds << " s -> "
-                      << (double(generate_steps) / seconds) << " tok/s\n";
+            std::cout << "  warm-up " << (warmup_seconds * 1e3) << " ms (context, module load,"
+                         " first touch of every weight)\n";
+            std::cout << "  steady state " << (steady_seconds / steady_tokens * 1e3)
+                      << " ms/token, argmax " << (argmax_seconds / generate_steps * 1e3)
+                      << " ms/token\n";
+            std::cout << "\n" << steady_tokens << " tokens after warm-up in " << steady_seconds
+                      << " s -> " << (double(steady_tokens) / steady_seconds) << " tok/s\n";
             cudaFree(device_arg);
             return 0;
         }

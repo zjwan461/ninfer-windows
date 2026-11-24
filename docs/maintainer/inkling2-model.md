@@ -164,6 +164,19 @@ of NVFP4 for the loop core's twelve layers and 5.38 GiB of q8 for the coda's fou
 A Q3 format would go further, but it means a codec, a kernel and their tests; the numbers above
 say it is not needed for the 16 GB target, so it stays unbuilt.
 
+## 8d. Decode rate, and how it moves
+
+`--generate` reports the two numbers separately, because averaging them is misleading:
+
+- **warm-up**, the first step: 1 s to 8 s here, for the CUDA context, the module load and the first
+  touch of every weight. It is a one-off and does not belong in a rate.
+- **steady state**: 41 ms to 65 ms per token on the 78-SM slice used here, i.e. 15 to 24 tok/s, with
+  the spread being the shared machine rather than the model. Argmax is 0.04 ms of that.
+
+The benchmark's figure (16-18 tok/s) is a *pipelined* number - many steps queued and synchronised
+once - while generation synchronises per token. They agree here, and neither is the wrong one, but
+they measure different things and should not be quoted interchangeably.
+
 ## 8c. The session reproduces the reference
 
 `execution/session.cpp` runs the 48 visits with a cache per visit and reproduces the recorded

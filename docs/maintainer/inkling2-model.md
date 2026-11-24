@@ -317,6 +317,24 @@ honest statement is that the token is host-bound and that the cost is spread acr
 rather than concentrated in one, which is a different fix - fewer operations per visit, and fewer
 visits repeated - from making one function faster.
 
+## 8g2. What nvidia-smi says that timing cannot
+
+During a benchmark this slice reports GPU-Util 0 percent, 119 W of a 500 W budget, and 18.4 GiB held
+by the process. The GPU is not busy - it is being woken up sixteen hundred times a token.
+
+That reframes the measurements above. The token is not 34 ms of arithmetic; it is about 1,600 kernels
+of a few microseconds each, with roughly 20 us of device-side latency between them, and the host
+waiting on the same rhythm. Bandwidth and flops are irrelevant at this size: the sequence length is
+what costs.
+
+So the only optimisation that moves this number is **fewer operations per token**, which is what the
+counters in §8g are for, and why the last three commits took 2,017 to 1,585. The obvious next step is
+the one that remains: fuse the eight routed experts of a visit into three launches (gate/up for all
+eight, swiglu for all eight, down-and-accumulate for all eight) instead of twenty-four, which takes
+the expert part of the budget from 864 to about 150.
+
+Measured with the GPU free: 25.3 / 21.8 / 24.5 tok/s launched, 28.9 / 29.0 captured.
+
 ## 8g. Where the decode time actually goes
 
 Measured, in this order, each one killing the previous theory:

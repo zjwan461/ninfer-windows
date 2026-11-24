@@ -375,13 +375,12 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
     // (1 - tanh(forget)) * x + tanh(gain) * message, with both gates read from both streams.
     const auto message_gate = [&](const LayerSlots& layer, Role down, Role forget_proj,
                                   Role gain_proj, void* x, void* message, void* out) {
-        head_rmsnorm(vec(x, kHidden), kEps, vec(s.rms_x, kHidden), stream);
-        head_rmsnorm(vec(message, kHidden), kEps, vec(s.rms_m, kHidden), stream);
-        // The gate reads both normalised streams side by side, so this needs a buffer of
-        // 2 * hidden: borrowing a hidden-sized one overruns it and quietly poisons its neighbour.
-        cudaMemcpyAsync(s.concat, s.rms_x, kHidden * 2, cudaMemcpyDeviceToDevice, stream);
-        cudaMemcpyAsync(static_cast<char*>(s.concat) + kHidden * 2, s.rms_m, kHidden * 2,
-                        cudaMemcpyDeviceToDevice, stream);
+        // The gate reads both normalised streams side by side, so the two norms write straight into
+        // the two halves of the buffer rather than into their own and then being copied: same
+        // result, two fewer operations per message visit, and no hidden-sized buffer to overrun.
+        auto* concat_second = static_cast<char*>(s.concat) + kHidden * 2;
+        head_rmsnorm(vec(x, kHidden), kEps, vec(s.concat, kHidden), stream);
+        head_rmsnorm(vec(message, kHidden), kEps, vec(concat_second, kHidden), stream);
         linear(vec(s.concat, 2 * kHidden), matrix_weight(weights, layer[down]),
                vec(s.controller, 64), stream);
         linear_role(layer, forget_proj, s.controller, 64, kHidden, s.forget);

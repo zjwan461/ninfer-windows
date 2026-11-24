@@ -473,6 +473,16 @@ That is the same shape of problem that the Qwen3.8 path solved by fusing several
 launch, and it is where the next round has to go: the four controller projections, the three
 convolution-state updates, and the norms around them are the candidates.
 
+## 8g15. How to settle 8g14 without guessing
+
+`compute-sanitizer` is not installed on this machine and cannot be, so the probe has to be built in. The
+cheapest one that answers the question: for one visit, copy the hidden state to the host right after it is
+written, and again at the very end of the visit, and print the first index that differs. If nothing
+differs, then the aliasing is not the problem and the fault is in which of the three input views the norms
+are given - which the same probe can answer by dumping the three pointers and the first few values of each.
+
+Either way it is one debug build and one run, and it replaces the two guesses that were made instead of it.
+
 ## 8g14. An aliasing that should work and does not
 
 Two rounds removed copies by turning buffers into views, and the third attempt - making the attention

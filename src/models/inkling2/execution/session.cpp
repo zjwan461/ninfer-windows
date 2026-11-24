@@ -1,6 +1,10 @@
 // Inkling-2-Mini decode: the 48-visit chain over 24 layers, with a cache per visit.
 #include "models/inkling2/execution/session.h"
 
+#include "models/inkling2/execution/weight_table.h"
+#include "ops/linear/nvfp4/nvfp4_launch.h"
+#include "ops/linear/q8/q8_launch.h"
+
 #include "models/inkling2/materialize.h"
 #include "models/inkling2/schedule.h"
 
@@ -137,6 +141,13 @@ struct Session::Impl {
     void* indices = nullptr;
     void* router_weights = nullptr;
     void* routing_host = nullptr;  // pinned: the readback is 64 bytes and pageable copies stage
+    // Device-side expert tables and the host templates that describe their geometry. The template
+    // is a real `matrix_weight` result rather than hand-filled fields, so layout, grouping and the
+    // container's divisor come from the same place the direct route reads them.
+    std::vector<void*> expert_w13_table;
+    std::vector<void*> expert_w2_table;
+    std::vector<Weight> expert_w13_template;
+    std::vector<Weight> expert_w2_template;
     void* position = nullptr;
     void* previous_h = nullptr;
     void* previous_block = nullptr;
@@ -229,6 +240,30 @@ Session::Session(TextWeights& weights, const Config& config, DeviceContext& devi
     s.router_weights = allocate(std::size_t(kTopK) * sizeof(float));
     // The selection is the one readback a step keeps, so its host buffer is pinned: a pageable
     // device-to-host copy stages through the driver and cannot overlap the transfer.
+    {
+        const int layers = static_cast<int>(weights.index.layers.size());
+        s.expert_w13_table.assign(static_cast<std::size_t>(layers), nullptr);
+        s.expert_w2_table.assign(static_cast<std::size_t>(layers), nullptr);
+        s.expert_w13_template.assign(static_cast<std::size_t>(layers), Weight{});
+        s.expert_w2_template.assign(static_cast<std::size_t>(layers), Weight{});
+        for (int layer_index = 0; layer_index < layers; ++layer_index) {
+            const auto& layer = weights.index.layers[static_cast<std::size_t>(layer_index)];
+            std::vector<Weight> w13(static_cast<std::size_t>(kExperts));
+            std::vector<Weight> w2(static_cast<std::size_t>(kExperts));
+            for (int expert = 0; expert < kExperts; ++expert) {
+                w13[static_cast<std::size_t>(expert)] =
+                    matrix_weight(weights, layer.expert_w13[static_cast<std::size_t>(expert)]);
+                w2[static_cast<std::size_t>(expert)] =
+                    matrix_weight(weights, layer.expert_w2[static_cast<std::size_t>(expert)]);
+            }
+            s.expert_w13_template[static_cast<std::size_t>(layer_index)] = w13.front();
+            s.expert_w2_template[static_cast<std::size_t>(layer_index)] = w2.front();
+            s.expert_w13_table[static_cast<std::size_t>(layer_index)] =
+                upload_weight_table(w13, nullptr);
+            s.expert_w2_table[static_cast<std::size_t>(layer_index)] =
+                upload_weight_table(w2, nullptr);
+        }
+    }
     check(cudaMallocHost(&s.routing_host, std::size_t(kTopK) * (sizeof(std::int32_t) + sizeof(float))),
           "routing host");
     s.position = allocate(sizeof(std::int32_t));
@@ -675,7 +710,46 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
         // The matching probe for the other half of the question: skip the routed experts entirely
         // and measure what the rest of the visit costs. Same caveat - it changes what is computed.
         static const bool skip_experts = std::getenv("NINFER_INKLING2_NO_EXPERTS") != nullptr;
+        // `NINFER_INKLING2_DEVICE_EXPERTS=1` takes the selection off the host entirely: both gather
+        // routes read the weight and the slot from device memory. Off by default while it is being
+        // proven, so the two paths can be compared on the same run.
+        static const bool device_experts =
+            std::getenv("NINFER_INKLING2_DEVICE_EXPERTS") != nullptr;
+        const auto* expert_slots = static_cast<const std::int32_t*>(s.indices);
+        const auto* routing_scales = static_cast<const float*>(s.router_weights);
+        const auto* w13_table =
+            static_cast<const Weight*>(s.expert_w13_table[static_cast<std::size_t>(layer_index)]);
+        const auto* w2_table =
+            static_cast<const Weight*>(s.expert_w2_table[static_cast<std::size_t>(layer_index)]);
+        const Weight& w13_extents =
+            s.expert_w13_template[static_cast<std::size_t>(layer_index)];
+        const Weight& w2_extents = s.expert_w2_template[static_cast<std::size_t>(layer_index)];
+        const bool nvfp4_experts = w13_extents.qtype == QType::NVFP4;
         for (int j = 0; j < kTopK && !skip_experts; ++j) {
+            if (device_experts) {
+                if (nvfp4_experts) {
+                    ops::detail::launch_nvfp4_gather_gemv(vec(s.mlp_in, kHidden), w13_table,
+                                                          expert_slots, j, w13_extents,
+                                                          vec(s.gate_up, 2 * kInter), stream);
+                } else {
+                    ops::detail::launch_q8_gather_gemv(vec(s.mlp_in, kHidden), w13_table,
+                                                       expert_slots, j, w13_extents,
+                                                       vec(s.gate_up, 2 * kInter), stream);
+                }
+                softcapped_swiglu(vec(s.gate_up, 2 * kInter), 4.0F, 25.0F, vec(s.act, kInter),
+                                  stream);
+                if (nvfp4_experts) {
+                    ops::detail::launch_nvfp4_gather_gemv(vec(s.act, kInter), w2_table, expert_slots,
+                                                          j, w2_extents, vec(s.down, kHidden),
+                                                          stream);
+                } else {
+                    ops::detail::launch_q8_gather_gemv(vec(s.act, kInter), w2_table, expert_slots, j,
+                                                       w2_extents, vec(s.down, kHidden), stream);
+                }
+                axpy_bf16_into_f32_device_scale(accumulator, vec(s.down, kHidden), routing_scales, j,
+                                                stream);
+                continue;
+            }
             const auto expert = static_cast<std::size_t>(indices[static_cast<std::size_t>(j)]);
             linear(vec(s.mlp_in, kHidden), matrix_weight(weights, layer.expert_w13[expert]),
                    vec(s.gate_up, 2 * kInter), stream);

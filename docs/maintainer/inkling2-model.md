@@ -422,6 +422,25 @@ Which means the next lever is the operations rather than the copies: 681 `linear
 of them per visit being the query, key and value projections from one input, and two more being the
 sink and gate projections from another.
 
+## 8g11. The wattage says the GPU is idle
+
+nvidia-smi during a benchmark: **120 W of a 500 W cap**, GPU-Util reading zero for most samples. The same
+card on llama.cpp reaches 400 W.
+
+Power draw is the cleanest signal this port has had, because it does not depend on clocks, load average
+or what the host is doing: 120 W means the device is idle between bursts. Four hundred means it is
+working. So the token is not limited by arithmetic, by bandwidth, or by the number of operations in the
+way the counters measure them - it is limited by **how much of the time the GPU has something to do**.
+
+That is consistent with everything measured before: 673 calls a token, each a few kilobytes, each so
+short that the device finishes it and waits. The expert kernels are the only ones long enough to matter,
+and they are about half the time.
+
+The fix is therefore not "fewer operations" as an end in itself, but **keeping the device fed**: fewer
+and larger launches, which is what the last few rounds did, and beyond that either a fused per-visit
+kernel of the kind Qwen3.8 has, or more than one token in flight. The second is not available to a single
+sequence; the first is the remaining work.
+
 ## 8g10. Where the remaining 30 ms goes
 
 The budget adds up, for the first time, and it says the next lever is not the call count:

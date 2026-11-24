@@ -14,10 +14,12 @@
 #include "ops/linear/q8/q8_launch.h"
 #include "ops/linear/t5/t5_project.h"
 
+#include <atomic>
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include "ops/op_counters.h"
 
 namespace ninfer::ops {
 namespace {
@@ -81,6 +83,7 @@ void validate_linear_semantics(const Tensor& x, const Weight& w, const Tensor& o
 
 void dispatch_linear(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy policy,
                      WorkspaceArena* workspace, cudaStream_t stream) {
+    ninfer::ops::op_counters().linear.fetch_add(1, std::memory_order_relaxed);
     switch (w.qtype) {
     case QType::Q4_G64_FP16:
         // Shapes the tuned table does not cover still have to run at a single token.

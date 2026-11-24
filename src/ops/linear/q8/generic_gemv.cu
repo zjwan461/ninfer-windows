@@ -8,6 +8,7 @@
 #include "core/tensor.h"
 #include "core/weight.h"
 #include "ops/common/math.h"
+#include "ops/op_counters.h"
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -101,6 +102,7 @@ __global__ void q8_gather_gemv_kernel(const __nv_bfloat16* __restrict__ x,
 
 void launch_q8_gather_gemv(const Tensor& x, const Weight* table, const std::int32_t* slots,
                            int slot, const Weight& extents, Tensor& out, cudaStream_t stream) {
+    ninfer::ops::op_counters().expert_gemv.fetch_add(1, std::memory_order_relaxed);
     const int rows = extents.n;
     const int k = extents.k;
     if (rows <= 0 || k <= 0 || (k % kGroup) != 0) { return; }

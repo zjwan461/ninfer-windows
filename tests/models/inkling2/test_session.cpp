@@ -7,6 +7,7 @@
 #include "models/inkling2/materialize.h"
 #include "ninfer/ops/argmax.h"
 #include "text/byte_bpe.h"
+#include "ops/op_counters.h"
 
 #include <cstdlib>
 #include <chrono>
@@ -134,6 +135,11 @@ int main(int argc, char** argv) {
             const auto end = std::chrono::steady_clock::now();
             const double seconds = std::chrono::duration<double>(end - begin).count();
             if (graph_exec != nullptr) { cudaGraphExecDestroy(graph_exec); }
+            auto& counters = ninfer::ops::op_counters();
+            std::printf("ops/token: linear %.0f, expert gemv %.0f, accumulate %.0f\n",
+                        double(counters.linear.load()) / bench_steps,
+                        double(counters.expert_gemv.load()) / bench_steps,
+                        double(counters.accumulate.load()) / bench_steps);
             std::cout << "host " << (host_seconds / bench_steps * 1e3) << " ms/token, wall "
                       << (seconds / bench_steps * 1e3) << " ms/token\n";
             std::cout << "session bench: " << bench_steps << " steps in " << seconds << " s -> "

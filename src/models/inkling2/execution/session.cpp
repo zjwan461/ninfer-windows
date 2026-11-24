@@ -83,6 +83,15 @@ void* allocate(std::size_t bytes) {
     return device;
 }
 
+
+// Every device-to-device copy in a step goes through here so the counters see it. Copies kept turning
+// out to be the avoidable part of the budget, and for three rounds they were not counted at all.
+cudaError_t copy_counted(void* destination, const void* source, std::size_t bytes,
+                         cudaMemcpyKind kind, cudaStream_t stream) {
+    ninfer::ops::op_counters().device_copy.fetch_add(1, std::memory_order_relaxed);
+    return cudaMemcpyAsync(destination, source, bytes, kind, stream);
+}
+
 Tensor vec(void* data, int width, DType dtype = DType::BF16) {
     return Tensor(data, dtype, {width, 1});
 }
@@ -421,7 +430,7 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
         // The convolution ops write the shifted window to a scratch buffer; these views name it.
         Tensor state_kv(s.state_scratch, DType::BF16, {kKv, kConvState});
         Tensor state_hidden(s.state_scratch, DType::BF16, {kHidden, kConvState});
-        cudaMemcpyAsync(s.h_in, s.h, kHidden * 2, cudaMemcpyDeviceToDevice, stream);
+        copy_counted(s.h_in, s.h, kHidden * 2, cudaMemcpyDeviceToDevice, stream);
         if (stage_sink && boundary) {
             stage_sink(layer_index, "boundary_in", s.h_in, kHidden);
         }
@@ -429,7 +438,7 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
         // ---- attention input: read out of the block stack -----------------------------------
         const int queries = sliding ? 1 : 3;
         if (layer_index > 0) {
-            cudaMemcpyAsync(static_cast<char*>(s.stack) + stack_length_now * kHidden * 2, s.h_in,
+            copy_counted(static_cast<char*>(s.stack) + stack_length_now * kHidden * 2, s.h_in,
                             kHidden * 2, cudaMemcpyDeviceToDevice, stream);
             const auto query_slot =
                 weights.index.attn_queries[static_cast<std::size_t>(layer_index)];
@@ -440,15 +449,15 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
             }
             Tensor read_out(s.message, DType::BF16, {kHidden, queries});
             block_residual_read(query, states, kEps, read_out, stream);
-            cudaMemcpyAsync(s.attn_in, s.message, kHidden * 2, cudaMemcpyDeviceToDevice, stream);
+            copy_counted(s.attn_in, s.message, kHidden * 2, cudaMemcpyDeviceToDevice, stream);
             if (queries == 3) {
-                cudaMemcpyAsync(s.k_in, static_cast<char*>(s.message) + kHidden * 2, kHidden * 2,
+                copy_counted(s.k_in, static_cast<char*>(s.message) + kHidden * 2, kHidden * 2,
                                 cudaMemcpyDeviceToDevice, stream);
-                cudaMemcpyAsync(s.v_in, static_cast<char*>(s.message) + 2 * kHidden * 2,
+                copy_counted(s.v_in, static_cast<char*>(s.message) + 2 * kHidden * 2,
                                 kHidden * 2, cudaMemcpyDeviceToDevice, stream);
             }
         } else {
-            cudaMemcpyAsync(s.attn_in, s.h_in, kHidden * 2, cudaMemcpyDeviceToDevice, stream);
+            copy_counted(s.attn_in, s.h_in, kHidden * 2, cudaMemcpyDeviceToDevice, stream);
         }
         if (stage_sink) { stage_sink(layer_index, "attn_in", s.attn_in, kHidden); }
 
@@ -457,9 +466,9 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
         if (uses_messages) {
             // The messages come from the pass that just ended: its last block entry and its final
             // hidden state.
-            cudaMemcpyAsync(s.msg_stack, s.previous_block, kHidden * 2, cudaMemcpyDeviceToDevice,
+            copy_counted(s.msg_stack, s.previous_block, kHidden * 2, cudaMemcpyDeviceToDevice,
                             stream);
-            cudaMemcpyAsync(static_cast<char*>(s.msg_stack) + kHidden * 2, s.previous_h,
+            copy_counted(static_cast<char*>(s.msg_stack) + kHidden * 2, s.previous_h,
                             kHidden * 2, cudaMemcpyDeviceToDevice, stream);
             const auto cp = dense_tensor(weights, weights.index.cross_pass_queries);
             const auto kv = dense_tensor(weights, weights.index.cross_pass_kv_queries);
@@ -471,13 +480,13 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
             const auto* cp_base = static_cast<const char*>(cp.data);
             const auto* kv_base = static_cast<const char*>(kv.data);
             char* dst = static_cast<char*>(merged);
-            cudaMemcpyAsync(dst, cp_base + row * row_bytes, row_bytes, cudaMemcpyDeviceToDevice,
+            copy_counted(dst, cp_base + row * row_bytes, row_bytes, cudaMemcpyDeviceToDevice,
                             stream);
-            cudaMemcpyAsync(dst + row_bytes, kv_base + row * row_bytes, row_bytes,
+            copy_counted(dst + row_bytes, kv_base + row * row_bytes, row_bytes,
                             cudaMemcpyDeviceToDevice, stream);
-            cudaMemcpyAsync(dst + 2 * row_bytes, kv_base + (row + 1) * row_bytes, row_bytes,
+            copy_counted(dst + 2 * row_bytes, kv_base + (row + 1) * row_bytes, row_bytes,
                             cudaMemcpyDeviceToDevice, stream);
-            cudaMemcpyAsync(dst + 3 * row_bytes, cp_base + (row + 1) * row_bytes, row_bytes,
+            copy_counted(dst + 3 * row_bytes, cp_base + (row + 1) * row_bytes, row_bytes,
                             cudaMemcpyDeviceToDevice, stream);
             Tensor message_query(merged, DType::FP32, {kHidden, 4});
             Tensor message_states(s.msg_stack, DType::BF16, {kHidden, 2});
@@ -491,10 +500,10 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
             message_gate(layer, Role::ControllerVDown, Role::ControllerVForget,
                          Role::ControllerVGain, v_base, rows + 2 * kHidden * 2, s.v_in);
         } else {
-            cudaMemcpyAsync(s.q_in, s.attn_in, kHidden * 2, cudaMemcpyDeviceToDevice, stream);
+            copy_counted(s.q_in, s.attn_in, kHidden * 2, cudaMemcpyDeviceToDevice, stream);
             if (queries == 1) {
-                cudaMemcpyAsync(s.k_in, s.attn_in, kHidden * 2, cudaMemcpyDeviceToDevice, stream);
-                cudaMemcpyAsync(s.v_in, s.attn_in, kHidden * 2, cudaMemcpyDeviceToDevice, stream);
+                copy_counted(s.k_in, s.attn_in, kHidden * 2, cudaMemcpyDeviceToDevice, stream);
+                copy_counted(s.v_in, s.attn_in, kHidden * 2, cudaMemcpyDeviceToDevice, stream);
             }
         }
 
@@ -516,7 +525,7 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
 
         // ---- query, key and value --------------------------------------------------------
         Tensor position_t(s.position, DType::I32, {1});
-        cudaMemcpyAsync(s.position, &position_now, sizeof(std::int32_t), cudaMemcpyHostToDevice,
+        copy_counted(s.position, &position_now, sizeof(std::int32_t), cudaMemcpyHostToDevice,
                         stream);
         ScaledL2ClipArgs q_args;
         q_args.rows = 1; q_args.heads = kHeads; q_args.head_dim = kHeadDim;
@@ -527,7 +536,7 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
         scaled_l2_clip(Tensor(s.q, DType::BF16, {kQ, 1}),
                        dense_tensor(weights, layer[Role::QkClip]),
                        sliding ? nullptr : &position_t, q_args, vec(s.q_clip, kQ), stream);
-        cudaMemcpyAsync(s.q, s.q_clip, kQ * 2, cudaMemcpyDeviceToDevice, stream);
+        copy_counted(s.q, s.q_clip, kQ * 2, cudaMemcpyDeviceToDevice, stream);
         if (stage_sink) { stage_sink(layer_index, "q", s.q, kQ); }
 
         linear_role(layer, Role::WkDv, s.kn, kHidden, kKv, s.k);
@@ -552,7 +561,7 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
                                    Tensor(state, DType::BF16, {kKv, kConvState}),
                                    state_kv, vec(out, kKv), kKvHeads, stream);
             }
-            cudaMemcpyAsync(state, s.state_scratch, std::size_t(kKv) * kConvState * 2,
+            copy_counted(state, s.state_scratch, std::size_t(kKv) * kConvState * 2,
                             cudaMemcpyDeviceToDevice, stream);
         }
         ScaledL2ClipArgs k_args;
@@ -560,14 +569,14 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
         k_args.threshold = kQkThreshold; k_args.tau_alpha = 0.0F; k_args.tau_floor = kLogFloor;
         scaled_l2_clip(Tensor(s.k_conv, DType::BF16, {kKv, 1}), Tensor(s.ones, DType::BF16, {kKvHeads, kHeadDim}),
                        nullptr, k_args, vec(s.k_clip, kKv), stream);
-        cudaMemcpyAsync(s.k_conv, s.k_clip, kKv * 2, cudaMemcpyDeviceToDevice, stream);
+        copy_counted(s.k_conv, s.k_clip, kKv * 2, cudaMemcpyDeviceToDevice, stream);
         // The value stream is normalised per head, not per vector.
         {
             Tensor v_heads_in(s.v_conv, DType::BF16, {kHeadDim, kKvHeads});
             Tensor v_heads_out(s.v_clip, DType::BF16, {kHeadDim, kKvHeads});
             head_rmsnorm(v_heads_in, kEps, v_heads_out, stream);
         }
-        cudaMemcpyAsync(s.v_conv, s.v_clip, kKv * 2, cudaMemcpyDeviceToDevice, stream);
+        copy_counted(s.v_conv, s.v_clip, kKv * 2, cudaMemcpyDeviceToDevice, stream);
         if (stage_sink) {
             stage_sink(layer_index, "k", s.k_conv, kKv);
             stage_sink(layer_index, "v", s.v_conv, kKv);
@@ -633,7 +642,7 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
             causal_dconv_residual(vec(s.proj, kHidden), conv2d,
                                   Tensor(state, DType::BF16, {kHidden, kConvState}),
                                   state_hidden, vec(s.attn_conv, kHidden), stream);
-            cudaMemcpyAsync(state, s.state_scratch, std::size_t(kHidden) * kConvState * 2,
+            copy_counted(state, s.state_scratch, std::size_t(kHidden) * kConvState * 2,
                             cudaMemcpyDeviceToDevice, stream);
         }
         if (stage_sink) { stage_sink(layer_index, "attn", s.attn_conv, kHidden); }
@@ -647,7 +656,7 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
             // A boundary starts a new block: it pushes the pre-layer state and does not add the
             // attention output to anything.
             cast_bf16_to_f32(residual, vec(s.attn_conv, kHidden), stream);
-            cudaMemcpyAsync(static_cast<char*>(s.stack) + std::size_t(stack_length_now) * kHidden * 2,
+            copy_counted(static_cast<char*>(s.stack) + std::size_t(stack_length_now) * kHidden * 2,
                             s.h_in, kHidden * 2, cudaMemcpyDeviceToDevice, stream);
         } else {
             cast_bf16_to_f32(residual, vec(s.h_in, kHidden), stream);
@@ -656,7 +665,7 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
         cast_f32_to_bf16(vec(s.gated, kHidden), residual, stream);
 
         // ---- MLP input, read from the stack plus the residual -----------------------------
-        cudaMemcpyAsync(static_cast<char*>(s.stack) + std::size_t(mlp_depth) * kHidden * 2,
+        copy_counted(static_cast<char*>(s.stack) + std::size_t(mlp_depth) * kHidden * 2,
                         s.gated, kHidden * 2, cudaMemcpyDeviceToDevice, stream);
         {
             const auto query_slot = weights.index.mlp_queries[static_cast<std::size_t>(layer_index)];
@@ -668,7 +677,7 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
             message_gate(layer, Role::ControllerMlpDown, Role::ControllerMlpForget,
                          Role::ControllerMlpGain, s.mlp_in,
                          static_cast<char*>(s.message) + 3 * kHidden * 2, s.gated);
-            cudaMemcpyAsync(s.mlp_in, s.gated, kHidden * 2, cudaMemcpyDeviceToDevice, stream);
+            copy_counted(s.mlp_in, s.gated, kHidden * 2, cudaMemcpyDeviceToDevice, stream);
         }
         rmsnorm(vec(s.mlp_in, kHidden), dense_tensor(weights, layer[Role::MlpNorm]), kEps, false,
                 vec(s.mlp_in, kHidden), stream);
@@ -689,9 +698,9 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
                    router_weights, stream);
         // The selection picks weight slots on the host, so this is the one readback a step keeps.
         auto* routing_host = static_cast<char*>(s.routing_host);
-        check(cudaMemcpyAsync(routing_host, s.indices, std::size_t(kTopK) * sizeof(std::int32_t),
+        check(copy_counted(routing_host, s.indices, std::size_t(kTopK) * sizeof(std::int32_t),
                               cudaMemcpyDeviceToHost, stream), "routing indices");
-        check(cudaMemcpyAsync(routing_host + std::size_t(kTopK) * sizeof(std::int32_t),
+        check(copy_counted(routing_host + std::size_t(kTopK) * sizeof(std::int32_t),
                               s.router_weights, std::size_t(kTopK) * sizeof(float),
                               cudaMemcpyDeviceToHost, stream), "routing weights");
         // The experts cannot start until the host knows which ones, so this drain stays; the copy
@@ -726,10 +735,10 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
             // The hook may have replaced the selection (the parity harness pins it to the oracle),
             // and the device path reads the selection from device memory, so a pinned choice has to
             // be written back or the two disagree.
-            check(cudaMemcpyAsync(s.indices, indices.data(),
+            check(copy_counted(s.indices, indices.data(),
                                   indices.size() * sizeof(std::int32_t), cudaMemcpyHostToDevice,
                                   stream), "pinned indices");
-            check(cudaMemcpyAsync(s.router_weights, routing.data(), routing.size() * sizeof(float),
+            check(copy_counted(s.router_weights, routing.data(), routing.size() * sizeof(float),
                                   cudaMemcpyHostToDevice, stream), "pinned weights");
         }
         Tensor accumulator(s.moe_acc, DType::FP32, {kHidden, 1});
@@ -836,7 +845,7 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
             causal_dconv_residual(vec(s.down, kHidden), conv2d,
                                   Tensor(state, DType::BF16, {kHidden, kConvState}),
                                   state_hidden, vec(s.mlp_conv, kHidden), stream);
-            cudaMemcpyAsync(state, s.state_scratch, std::size_t(kHidden) * kConvState * 2,
+            copy_counted(state, s.state_scratch, std::size_t(kHidden) * kConvState * 2,
                             cudaMemcpyDeviceToDevice, stream);
         }
         if (stage_sink) { stage_sink(layer_index, "mlp", s.mlp_conv, kHidden); }
@@ -850,12 +859,12 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
             if (visit.pass > 0) {
                 // A later pass restarts from the pre-loop snapshot; the pass that just ended is the
                 // message source.
-                cudaMemcpyAsync(s.previous_h, s.h, kHidden * 2, cudaMemcpyDeviceToDevice, stream);
-                cudaMemcpyAsync(s.previous_block,
+                copy_counted(s.previous_h, s.h, kHidden * 2, cudaMemcpyDeviceToDevice, stream);
+                copy_counted(s.previous_block,
                                 static_cast<char*>(s.stack) + std::size_t(stack_length - 1) * kHidden * 2,
                                 kHidden * 2, cudaMemcpyDeviceToDevice, stream);
-                cudaMemcpyAsync(s.h, s.pre_loop_h, kHidden * 2, cudaMemcpyDeviceToDevice, stream);
-                cudaMemcpyAsync(s.stack, s.pre_loop_stack,
+                copy_counted(s.h, s.pre_loop_h, kHidden * 2, cudaMemcpyDeviceToDevice, stream);
+                copy_counted(s.stack, s.pre_loop_stack,
                                 std::size_t(stack_length) * kHidden * 2, cudaMemcpyDeviceToDevice,
                                 stream);
                 stack_length = 1;
@@ -867,8 +876,8 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
             pass_seen = static_cast<int>(visit.pass);
         }
         if (visit.pass == 0 && visit.layer == 6 && !pre_loop_saved) {
-            cudaMemcpyAsync(s.pre_loop_h, s.h, kHidden * 2, cudaMemcpyDeviceToDevice, stream);
-            cudaMemcpyAsync(s.pre_loop_stack, s.stack,
+            copy_counted(s.pre_loop_h, s.h, kHidden * 2, cudaMemcpyDeviceToDevice, stream);
+            copy_counted(s.pre_loop_stack, s.stack,
                             std::size_t(stack_length) * kHidden * 2, cudaMemcpyDeviceToDevice,
                             stream);
             pre_loop_saved = true;
@@ -879,7 +888,7 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
 
     // ---- final read, norm and unembed ------------------------------------------------------
     {
-        cudaMemcpyAsync(static_cast<char*>(s.stack) + std::size_t(stack_length) * kHidden * 2, s.h,
+        copy_counted(static_cast<char*>(s.stack) + std::size_t(stack_length) * kHidden * 2, s.h,
                         kHidden * 2, cudaMemcpyDeviceToDevice, stream);
         Tensor query(dense_tensor(weights, weights.index.output_query).data, DType::FP32,
                      {kHidden, 1});

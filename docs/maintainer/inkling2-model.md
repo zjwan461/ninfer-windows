@@ -144,6 +144,29 @@ not a namespace move. The reference is close at hand - `transformers` encodes an
 strings, so the encoder can be checked token for token - but it is a few hundred lines of Unicode
 classification work, and worth knowing before anyone plans around it.
 
+## 9f. The pre-tokeniser's exact split
+
+Seven alternatives, in order, and the order is what decides the result:
+
+```
+[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?
+| [^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?
+| \p{N}{1,3}
+|  ?[^\s\p{L}\p{N}]+[\r\n/]*
+| \s*[\r\n]+
+| \s+(?!\S)
+| \s+
+```
+
+`tests/text/llama3_pretokenizer_reference.py` evaluates exactly that pattern with a Unicode-aware
+regex engine and writes `tests/text/fixtures/llama3_split.json`: 25 strings and the chunks they must
+produce. The behaviours worth pinning down are visible in it - a single leading space attaches to
+the following word, digits cap at three per chunk, contractions stay with their word except when
+the alternation splits them (`I'll` then `'ve`), and trailing whitespace becomes its own chunk.
+
+The C++ scanner is written against that file, so the pattern is the authority rather than anyone's
+reading of it.
+
 ## 9d. Runbook: measuring on an RTX 4080 SUPER
 
 The 32 GB card holds the pass-through artifact as it stands, so nothing has to be re-converted.

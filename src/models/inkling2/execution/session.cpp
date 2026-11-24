@@ -706,10 +706,11 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
             block_residual_read(query, states, kEps, vec(s.mlp_in, kHidden), stream);
         }
         if (uses_messages) {
+            // The gate is elementwise in its input, so it can write over it: the copy that used to
+            // move the result back into mlp_in is gone.
             message_gate(layer, Role::ControllerMlpDown, Role::ControllerMlpForget,
                          Role::ControllerMlpGain, s.mlp_in,
-                         static_cast<char*>(s.message) + 3 * kHidden * 2, s.gated);
-            copy_counted(s.mlp_in, s.gated, kHidden * 2, cudaMemcpyDeviceToDevice, stream);
+                         static_cast<char*>(s.message) + 3 * kHidden * 2, s.mlp_in);
         }
         rmsnorm(vec(s.mlp_in, kHidden), dense_tensor(weights, layer[Role::MlpNorm]), kEps, false,
                 vec(s.mlp_in, kHidden), stream);

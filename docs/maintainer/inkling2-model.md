@@ -488,6 +488,24 @@ Which is to say: the countable part of the objective is done, and the part that 
 measurement on hardware this machine is not. That distinction belongs in the record rather than in a
 claim that the goal is finished.
 
+## 8g22. The question cannot be settled from the reference
+
+The upstream repository publishes weights, a config and a tokenizer, and no modelling code:
+
+    config.json, generation_config.json, hf_quant_config.json, model.safetensors,
+    mtp.safetensors, processor_config.json, tokenizer.json, ...   (no *.py)
+
+There is no `modeling_inkling2.py` to read, so "should a first-pass full layer read the previous layer's
+attention input" cannot be answered by consulting the reference implementation - it is not published.
+
+Which leaves the oracle as the only authority, and it says the current order produces the reference logits
+to within 0.84 percent over forty-eight visits. So the behaviour is validated rather than understood: the
+copy stays, and the question of whether the order is intentional is recorded as a limitation of what can be
+verified here rather than as a known bug.
+
+Anyone who obtains the modelling code should check this first: it is the one place in the port where the
+data flow was established by matching outputs rather than by reading the definition.
+
 ## 8g21. The answer, and it explains the failed aliasing
 
 Same probe, extended to print the key buffer at the end of the visit as well as the start:

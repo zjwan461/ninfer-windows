@@ -136,8 +136,8 @@ int main(int argc, char** argv) {
                 void* d_gathered = nullptr;
                 cudaMalloc(&d_gathered, got.size() * 2);
                 ninfer::Tensor t_gathered(d_gathered, ninfer::DType::BF16, {2304, 1});
-                ninfer::ops::detail::launch_nvfp4_gather_gemv(t_x, static_cast<const Weight*>(table),
-                                                              0, t_gathered, nullptr);
+                ninfer::ops::detail::launch_nvfp4_gather_gemv(
+                    t_x, static_cast<const Weight*>(table), 0, weight, t_gathered, nullptr);
                 if (cudaDeviceSynchronize() != cudaSuccess) {
                     std::cerr << "FAIL: gather route: " << cudaGetErrorString(cudaGetLastError())
                               << "\n";
@@ -146,15 +146,23 @@ int main(int argc, char** argv) {
                 std::vector<std::uint16_t> gathered(got.size());
                 cudaMemcpy(gathered.data(), d_gathered, gathered.size() * 2,
                            cudaMemcpyDeviceToHost);
-                if (gathered != got) {
-                    std::size_t differing = 0;
-                    for (std::size_t i = 0; i < got.size(); ++i) {
-                        if (gathered[i] != got[i]) { ++differing; }
-                    }
-                    std::cerr << "FAIL: gather route differs from the direct route in " << differing
-                              << " of " << got.size() << " values\n";
+                // Against the reference dequantisation, not against the other route: the direct
+                // route may use a shape-tuned kernel with a different reduction order, so the last
+                // bit can legitimately differ. The reference is the thing both must reproduce.
+                double gather_error = 0.0;
+                double gather_ratio = 0.0;
+                for (std::size_t i = 0; i < gathered.size(); ++i) {
+                    const double error = std::fabs(double(from_bf16(gathered[i])) - expected[i]);
+                    gather_error = std::max(gather_error, error);
+                    gather_ratio = std::max(gather_ratio,
+                                            error / (2.0e-2 + 0.02 * std::fabs(expected[i])));
+                }
+                if (gather_ratio > 1.0) {
+                    std::cerr << "FAIL: gather route max|err| " << gather_error << "\n";
                     return 1;
                 }
+                worst_ratio = std::max(worst_ratio, gather_ratio);
+                worst = std::max(worst, gather_error);
                 cudaFree(d_gathered);
                 cudaFree(table);
             }

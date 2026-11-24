@@ -119,18 +119,19 @@ __global__ void nvfp4_gather_gemv_kernel(const __nv_bfloat16* __restrict__ x,
 
 } // namespace
 
-void launch_nvfp4_gather_gemv(const Tensor& x, const Weight* table, int slot, Tensor& out,
-                              cudaStream_t stream) {
-    const Weight weight = table[slot];
-    const int rows = weight.n;
-    const int k = weight.k;
+// `extents` is a host copy of the same entry: the table lives on the device, so the launcher cannot
+// read it, and the only thing the kernel needs from it is the pair of data pointers.
+void launch_nvfp4_gather_gemv(const Tensor& x, const Weight* table, int slot, const Weight& extents,
+                              Tensor& out, cudaStream_t stream) {
+    const int rows = extents.n;
+    const int k = extents.k;
     if (rows <= 0 || k <= 0) { return; }
     constexpr int kThreads = 256;
     const int warps = kThreads / 32;
     const auto blocks = static_cast<unsigned>((rows + warps - 1) / warps);
     nvfp4_gather_gemv_kernel<<<blocks, kThreads, 0, stream>>>(
         static_cast<const __nv_bfloat16*>(x.data), table, slot,
-        static_cast<__nv_bfloat16*>(out.data), rows, k, weight.weight_scale_divisor);
+        static_cast<__nv_bfloat16*>(out.data), rows, k, extents.weight_scale_divisor);
 }
 
 void launch_nvfp4_generic_gemv(const Tensor& x, const Weight& weight, Tensor& out,

@@ -45,6 +45,7 @@ int main(int argc, char** argv) {
         std::vector<std::uint32_t> prompt_ids;
         int bench_steps = 0;
         int generate_steps = 0;
+        bool capture_graph = false;
         std::filesystem::path reference_stages;
         for (int i = 1; i < argc; ++i) {
             const std::string arg(argv[i]);
@@ -67,6 +68,7 @@ int main(int argc, char** argv) {
             else if (arg == "--stages" && i + 1 < argc) { reference_stages = argv[++i]; }
             else if (arg == "--bench" && i + 1 < argc) { bench_steps = std::stoi(argv[++i]); }
             else if (arg == "--generate" && i + 1 < argc) { generate_steps = std::stoi(argv[++i]); }
+            else if (arg == "--graph") { capture_graph = true; }
             else { throw std::invalid_argument("unknown argument " + arg); }
         }
         if (artifact_path.empty() ||
@@ -94,6 +96,23 @@ int main(int argc, char** argv) {
                 cudaDeviceSynchronize();
             }
             session.reset();
+            // `--graph` captures one step and replays it, which is what the Qwen 3.8 path does and
+            // what this one cannot do yet. It only works with the probes that remove the host-side
+            // decisions, and that is the point: it measures what capture is worth before the work
+            // of making the selection device-side.
+            cudaGraphExec_t graph_exec = nullptr;
+            if (capture_graph) {
+                cudaStream_t capture_stream = nullptr;
+                cudaStreamCreate(&capture_stream);
+                cudaGraph_t graph = nullptr;
+                cudaStreamBeginCapture(capture_stream, cudaStreamCaptureModeThreadLocal);
+                session.step(token, capture_stream);
+                cudaStreamEndCapture(capture_stream, &graph);
+                cudaGraphInstantiateWithFlags(&graph_exec, graph, 0);
+                cudaGraphDestroy(graph);
+                cudaStreamDestroy(capture_stream);
+                std::cout << "captured a step into a graph\n";
+            }
             const auto begin = std::chrono::steady_clock::now();
             // Two clocks: the host time spent queueing the step, and the wall time including the
             // GPU finishing it. If they are equal the host is the bottleneck and the kernels are
@@ -101,13 +120,15 @@ int main(int argc, char** argv) {
             double host_seconds = 0.0;
             for (int step = 0; step < bench_steps; ++step) {
                 const auto host_begin = std::chrono::steady_clock::now();
-                session.step(token, nullptr);
+                if (graph_exec != nullptr) { cudaGraphLaunch(graph_exec, nullptr); }
+                else { session.step(token, nullptr); }
                 host_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() -
                                                              host_begin).count();
             }
             cudaDeviceSynchronize();
             const auto end = std::chrono::steady_clock::now();
             const double seconds = std::chrono::duration<double>(end - begin).count();
+            if (graph_exec != nullptr) { cudaGraphExecDestroy(graph_exec); }
             std::cout << "host " << (host_seconds / bench_steps * 1e3) << " ms/token, wall "
                       << (seconds / bench_steps * 1e3) << " ms/token\n";
             std::cout << "session bench: " << bench_steps << " steps in " << seconds << " s -> "

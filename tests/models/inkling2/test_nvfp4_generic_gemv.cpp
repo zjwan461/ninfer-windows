@@ -136,8 +136,13 @@ int main(int argc, char** argv) {
                 void* d_gathered = nullptr;
                 cudaMalloc(&d_gathered, got.size() * 2);
                 ninfer::Tensor t_gathered(d_gathered, ninfer::DType::BF16, {2304, 1});
+                void* d_slots = nullptr;
+                cudaMalloc(&d_slots, sizeof(std::int32_t));
+                cudaMemset(d_slots, 0, sizeof(std::int32_t));
                 ninfer::ops::detail::launch_nvfp4_gather_gemv(
-                    t_x, static_cast<const Weight*>(table), 0, weight, t_gathered, nullptr);
+                    t_x, static_cast<const Weight*>(table), static_cast<const std::int32_t*>(d_slots),
+                    0, weight, t_gathered, nullptr);
+                cudaFree(d_slots);
                 if (cudaDeviceSynchronize() != cudaSuccess) {
                     std::cerr << "FAIL: gather route: " << cudaGetErrorString(cudaGetLastError())
                               << "\n";

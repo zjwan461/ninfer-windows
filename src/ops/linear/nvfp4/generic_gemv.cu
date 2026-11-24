@@ -76,13 +76,14 @@ __global__ void nvfp4_generic_gemv_kernel(const __nv_bfloat16* __restrict__ x,
 // never has to reach the host. One thread per row keeps it simple: it is the reference shape, and the
 // point of the route is that a captured graph can contain it.
 __global__ void nvfp4_gather_gemv_kernel(const __nv_bfloat16* __restrict__ x,
-                                         const Weight* __restrict__ table, int slot,
+                                         const Weight* __restrict__ table,
+                                         const std::int32_t* __restrict__ slots, int slot,
                                          __nv_bfloat16* __restrict__ out, int rows, int k,
                                          float divisor) {
     const int warps_per_block = blockDim.x / 32;
     const int row = blockIdx.x * warps_per_block + threadIdx.x / 32;
     if (row >= rows) { return; }
-    const Weight weight = table[slot];
+    const Weight weight = table[slots[slot]];
     const auto* codes = static_cast<const std::uint8_t*>(weight.qdata);
     const auto* scales = static_cast<const std::uint8_t*>(weight.scales);
     const int lane = threadIdx.x % 32;
@@ -121,8 +122,9 @@ __global__ void nvfp4_gather_gemv_kernel(const __nv_bfloat16* __restrict__ x,
 
 // `extents` is a host copy of the same entry: the table lives on the device, so the launcher cannot
 // read it, and the only thing the kernel needs from it is the pair of data pointers.
-void launch_nvfp4_gather_gemv(const Tensor& x, const Weight* table, int slot, const Weight& extents,
-                              Tensor& out, cudaStream_t stream) {
+void launch_nvfp4_gather_gemv(const Tensor& x, const Weight* table, const std::int32_t* slots,
+                              int slot, const Weight& extents, Tensor& out,
+                              cudaStream_t stream) {
     const int rows = extents.n;
     const int k = extents.k;
     if (rows <= 0 || k <= 0) { return; }
@@ -130,7 +132,7 @@ void launch_nvfp4_gather_gemv(const Tensor& x, const Weight* table, int slot, co
     const int warps = kThreads / 32;
     const auto blocks = static_cast<unsigned>((rows + warps - 1) / warps);
     nvfp4_gather_gemv_kernel<<<blocks, kThreads, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(x.data), table, slot,
+        static_cast<const __nv_bfloat16*>(x.data), table, slots, slot,
         static_cast<__nv_bfloat16*>(out.data), rows, k, extents.weight_scale_divisor);
 }
 

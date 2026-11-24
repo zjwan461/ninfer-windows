@@ -648,16 +648,34 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
                               cudaMemcpyDeviceToHost, stream), "routing weights");
         // The experts cannot start until the host knows which ones, so this drain stays; the copy
         // itself no longer stages through a pageable buffer.
-        check(cudaStreamSynchronize(stream), "routing wait");
+        //
+        // `NINFER_INKLING2_NO_ROUTING_READBACK=1` skips the drain and reuses the previous visit's
+        // selection. It is a probe, not a mode: it changes what the model computes, and exists so
+        // that "how much does the readback cost" can be answered by measurement instead of by
+        // argument.
+        static const bool skip_readback = std::getenv("NINFER_INKLING2_NO_ROUTING_READBACK") != nullptr;
+        if (!skip_readback) { check(cudaStreamSynchronize(stream), "routing wait"); }
+        static std::vector<std::int32_t> probe_indices(static_cast<std::size_t>(kTopK), 0);
+        static std::vector<float> probe_routing(static_cast<std::size_t>(kTopK), 1.0F);
         std::vector<std::int32_t> indices(static_cast<std::size_t>(kTopK));
         std::vector<float> routing(static_cast<std::size_t>(kTopK));
-        std::memcpy(indices.data(), routing_host, indices.size() * sizeof(std::int32_t));
-        std::memcpy(routing.data(), routing_host + std::size_t(kTopK) * sizeof(std::int32_t),
-                    routing.size() * sizeof(float));
+        if (skip_readback) {
+            indices = probe_indices;
+            routing = probe_routing;
+        } else {
+            std::memcpy(indices.data(), routing_host, indices.size() * sizeof(std::int32_t));
+            std::memcpy(routing.data(), routing_host + std::size_t(kTopK) * sizeof(std::int32_t),
+                        routing.size() * sizeof(float));
+            probe_indices = indices;
+            probe_routing = routing;
+        }
         if (routing_hook) { routing_hook(slot, indices, routing); }
         Tensor accumulator(s.moe_acc, DType::FP32, {kHidden, 1});
         check(cudaMemsetAsync(s.moe_acc, 0, std::size_t(kHidden) * 4, stream), "moe clear");
-        for (int j = 0; j < kTopK; ++j) {
+        // The matching probe for the other half of the question: skip the routed experts entirely
+        // and measure what the rest of the visit costs. Same caveat - it changes what is computed.
+        static const bool skip_experts = std::getenv("NINFER_INKLING2_NO_EXPERTS") != nullptr;
+        for (int j = 0; j < kTopK && !skip_experts; ++j) {
             const auto expert = static_cast<std::size_t>(indices[static_cast<std::size_t>(j)]);
             linear(vec(s.mlp_in, kHidden), matrix_weight(weights, layer.expert_w13[expert]),
                    vec(s.gate_up, 2 * kInter), stream);

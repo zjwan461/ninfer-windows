@@ -490,6 +490,20 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
 
         void* k_base = queries == 3 ? s.k_in : s.attn_in;
         void* v_base = queries == 3 ? s.v_in : s.attn_in;
+        if (std::getenv("NINFER_INKLING2_PROBE_KIN") != nullptr && !sliding && slot < 24) {
+            // On a full layer of the first pass nothing should have filled k_in yet. If it holds the
+            // attention input's contents, something else feeds it; if it holds anything else, the
+            // bases are reading values left over from an earlier visit.
+            std::uint16_t k_in_head = 0;
+            std::uint16_t attn_head = 0;
+            std::uint16_t h_in_head = 0;
+            check(cudaMemcpy(&k_in_head, s.k_in, 2, cudaMemcpyDeviceToHost), "probe k_in");
+            check(cudaMemcpy(&attn_head, s.attn_in, 2, cudaMemcpyDeviceToHost), "probe attn");
+            check(cudaMemcpy(&h_in_head, s.h_in, 2, cudaMemcpyDeviceToHost), "probe h_in");
+            std::printf("probe full layer %d (visit %d): k_base=%p k_in=%p attn=%p | k_in0=%u attn0=%u "
+                        "h_in0=%u\n", layer_index, slot, k_base, s.k_in, s.attn_in, k_in_head,
+                        attn_head, h_in_head);
+        }
         if (uses_messages) {
             // The messages come from the pass that just ended: its last block entry and its final
             // hidden state.

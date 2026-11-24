@@ -488,6 +488,25 @@ Which is to say: the countable part of the objective is done, and the part that 
 measurement on hardware this machine is not. That distinction belongs in the record rather than in a
 claim that the goal is finished.
 
+## 8g20. That hypothesis, refuted by the probe
+
+`NINFER_INKLING2_PROBE_KIN=1` prints, on each full layer of the first pass, the key base and the first
+value of the three buffers involved:
+
+    probe full layer 5  (visit 5):  k_base=...4800 k_in=...4800 attn=...2400
+                                    k_in0=48792 attn0=48771 h_in0=49170
+    probe full layer 11 (visit 11): k_in0=49025 attn0=48997 h_in0=49389
+
+So `k_in` is its own buffer with its own contents, changing from visit to visit, and different from both
+the attention input and the hidden state. It is not stale garbage, which is what 8g19 predicted, so that
+explanation is wrong.
+
+What remains true from 8g19 is the ordering: the bases are chosen before the message block. What is now
+unknown is who fills `k_in` on a first-pass full layer, since the controller that would write it does not
+run there. That is the next thing to print - the same probe extended to dump `k_in` after each of the
+visit's remaining operations - and it is the last piece needed to explain why removing the copy breaks the
+oracle.
+
 ## 8g19. Where the aliasing failure probably lives
 
 Reading the order of operations rather than guessing at it:

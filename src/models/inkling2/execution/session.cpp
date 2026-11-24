@@ -3,6 +3,7 @@
 
 #include "models/inkling2/execution/weight_table.h"
 #include "ops/linear/nvfp4/nvfp4_launch.h"
+#include "ops/linear/bf16/bf16_launch.h"
 #include "ops/linear/q8/q8_launch.h"
 #include "ops/op_counters.h"
 
@@ -541,8 +542,12 @@ Tensor Session::step(std::uint32_t token, cudaStream_t stream) {
         void* q_states = s.q_clip;
         if (stage_sink) { stage_sink(layer_index, "q", q_states, kQ); }
 
-        linear_role(layer, Role::WkDv, s.kn, kHidden, kKv, s.k);
-        linear_role(layer, Role::WvDv, s.vn, kHidden, kKv, s.v);
+        // Key and value are the same projection geometry over the same width, so one launch does
+        // both: a warp computes the key row and the value row together.
+        ops::detail::launch_bf16_dual_gemv(vec(s.kn, kHidden), vec(s.vn, kHidden),
+                                           matrix_weight(weights, layer[Role::WkDv]),
+                                           matrix_weight(weights, layer[Role::WvDv]),
+                                           vec(s.k, kKv), vec(s.v, kKv), stream);
         for (int stream_index = 0; stream_index < 2; ++stream_index) {
             const bool is_key = stream_index == 0;
             void* base = is_key ? s.k : s.v;

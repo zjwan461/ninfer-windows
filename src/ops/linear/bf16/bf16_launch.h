@@ -16,6 +16,10 @@ using Bf16Launch = void (*)(const Tensor&, const Weight&, Tensor&, cudaStream_t)
 void launch_bf16_generic(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream);
 
 // Runtime-extent BF16 decode GEMV (one token), used when no tuned shape covers the geometry.
+void launch_bf16_dual_gemv(const Tensor& x_a, const Tensor& x_b, const Weight& weight_a,
+                           const Weight& weight_b,
+                           Tensor& out_a, Tensor& out_b, cudaStream_t stream);
+
 void launch_bf16_generic_gemv(const Tensor& x, const Weight& weight, Tensor& out,
                               cudaStream_t stream);
 

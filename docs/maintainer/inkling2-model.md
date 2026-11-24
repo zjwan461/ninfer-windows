@@ -403,6 +403,21 @@ queueing, and the wall time is the same number, so the token is **host-bound**: 
 operations per token at 4.49 us of launch each is 6 ms, which leaves about 25 us per operation of
 C++ work. That is the thing to fix, and it is not arithmetic, not bandwidth, and not synchronisation.
 
+## 8f2. The machine is not the problem
+
+The obvious explanation for 29 tok/s is that this slice is slow. The same slice says otherwise: with
+llama.cpp's own build and its own Q4_K_M of this model, from §8e, it decodes at 51.4 tok/s. Same
+machine, same model, same hour.
+
+So the hardware can do this model at 51 tok/s and this port does it at 29. That is a port that is
+1.8 times behind, not a machine that cannot run it.
+
+Worth also recording what this box *cannot* do, because it is a property of the environment rather
+than of the code: the product engine (`ninfer::Engine`, and therefore the CLI and the server) needs
+ffmpeg and libcurl development headers, and this container has neither - so the Qwen3.8 artifact cannot
+be benchmarked here through the engine path at all. The model runtime that this port uses builds
+without them.
+
 ## 8f. How far ahead this engine is supposed to be
 
 The engine has a recorded head-to-head on a card of this class (`docs/llamacpp-comparison.md`,

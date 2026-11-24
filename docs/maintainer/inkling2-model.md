@@ -497,7 +497,32 @@ queueing, and the wall time is the same number, so the token is **host-bound**: 
 operations per token at 4.49 us of launch each is 6 ms, which leaves about 25 us per operation of
 C++ work. That is the thing to fix, and it is not arithmetic, not bandwidth, and not synchronisation.
 
-## 8f2. The machine is not the problem
+## 8f3. Where this port stands against the engine's architecture
+
+Asked directly, so answered directly: the kernels are aligned and the driver is not.
+
+**Aligned**: everything this port added below the model layer - the gather routes, the fused gate/up and
+down kernels, the dual projection, the counting - lives in `src/ops` beside the operations every model
+uses. There is no second implementation of a kernel and no fork of the op contract.
+
+**Not aligned**: `ninfer::Engine` is bound to one model. Its translation unit names
+`models::qwen3_5::PreparedPrompt`, `RetainedSessionSnapshot` and the rest directly, and nothing in
+`src/runtime` defines a model interface to implement. So this port's `Session` - the thing that runs
+forty-eight visits and decodes - is a **parallel driver** beside the engine rather than a model inside
+it. It is why the model runs from a test binary and not from `ninfer` or `ninfer-serve`.
+
+Two honest options:
+
+1. **Give the engine a model interface** and let Inkling 2 implement it, the way the Qwen path does.
+   That is the architecturally right answer and it is the one the repository's own rule asks for - no
+   parallel authorities - but it means extracting an interface out of a six-thousand-line Qwen program
+   and porting this model's driver onto it.
+2. **Keep the standalone session** as the runtime for this model, documented as such, and revisit when a
+   second loop model needs the same thing.
+
+The first is the direction; the second is what exists today, and the difference should not be lost in a
+summary that says "the model runs".
+
 
 The obvious explanation for 29 tok/s is that this slice is slow. The same slice says otherwise: with
 llama.cpp's own build and its own Q4_K_M of this model, from §8e, it decodes at 51.4 tok/s. Same

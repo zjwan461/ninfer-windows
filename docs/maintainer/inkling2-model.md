@@ -422,6 +422,25 @@ Which means the next lever is the operations rather than the copies: 681 `linear
 of them per visit being the query, key and value projections from one input, and two more being the
 sink and gate projections from another.
 
+## 8g10. Where the remaining 30 ms goes
+
+The budget adds up, for the first time, and it says the next lever is not the call count:
+
+| part | estimate |
+|---|---:|
+| expert GPU work (2.5 GiB at the measured 155 GB/s) | 16.7 ms |
+| 622 kernel launches at 4.5 us | 2.8 ms |
+| 845 copies at about 2 us of driver time | 1.7 ms |
+| **unaccounted, i.e. small-kernel GPU time** | **9.3 ms** |
+
+Nine milliseconds in about six hundred kernels that each move a few kilobytes is fifteen microseconds
+apiece - far more than the arithmetic in them. A hidden-sized kernel is nine blocks of 256 threads, so
+it uses nine of seventy-eight SMs and then waits to be scheduled again.
+
+That is the same shape of problem that the Qwen3.8 path solved by fusing several of these into one
+launch, and it is where the next round has to go: the four controller projections, the three
+convolution-state updates, and the norms around them are the candidates.
+
 ## 8g9. Where the operation budget ended up
 
 Measured through this round of work, with the oracle at 5 of 5 after every step:

@@ -473,6 +473,33 @@ That is the same shape of problem that the Qwen3.8 path solved by fusing several
 launch, and it is where the next round has to go: the four controller projections, the three
 convolution-state updates, and the norms around them are the candidates.
 
+## 8g13. The closed operation budget
+
+Every kind of call a step makes now has a counter, so this list is the whole of it:
+
+| per token | count |
+|---|---:|
+| linear | 426 |
+| routed expert calls | 162 |
+| swiglu | 34 |
+| accumulate | 0 |
+| KV store | 51 |
+| device copies | 564 |
+| norms | 155 |
+| **total** | **1392** |
+
+Down from about 2,900 when this round of work started, with the oracle at 5 of 5 after every commit. The
+three largest single reductions were the eight-expert gate/up and down fusions, the KV store's pitched
+copy, and the message gate's norms.
+
+Getting here took five rounds of discovering that the metric did not contain what a change removed - the
+last one made a fusion *look* like a regression. The counter set is closed over the step now, which is
+worth more than any single optimisation in it: without it the next round cannot tell a win from noise.
+
+Decode rate at the last unobstructed measurement was 33.5 tok/s against llama.cpp's 51.4 on the same
+slice. The card is now shared with another workload (289 W of a 500 W cap when idle for us), so further
+rate claims have to wait for a quiet machine or for the 4080 SUPER numbers.
+
 ## 8g9. Where the operation budget ended up
 
 Measured through this round of work, with the oracle at 5 of 5 after every step:

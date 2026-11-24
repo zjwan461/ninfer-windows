@@ -245,6 +245,24 @@ of NVFP4 for the loop core's twelve layers and 5.38 GiB of q8 for the coda's fou
 A Q3 format would go further, but it means a codec, a kernel and their tests; the numbers above
 say it is not needed for the 16 GB target, so it stays unbuilt.
 
+## 8i. The answer is in the Qwen 3.8 path
+
+The Qwen 3.8 decode does not call operations one after another the way this port does. It captures
+them: `program/decode.cpp` has `capture_graph`, `DecodeGraphExecutable` and `install_graph_profile`,
+and a token is one replay of an installed graph. That is the whole difference, and it explains every
+number in §8g at once - a graph node costs 0.89 us against 4.49 for a launch, and the host stops
+re-executing a thousand calls per token.
+
+Mirroring it here needs one thing first. A graph can only be captured when nothing inside it depends
+on a host decision, and this path's per-visit expert selection is exactly that decision: the router
+writes eight indices on the device, the host reads them, and the eight weight handles follow. So the
+order of work is:
+
+1. resolve the selection on the device - a pointer table over the expert weights plus a gather route,
+   so the choice never reaches the host;
+2. capture a token (or a visit) into a graph and replay it;
+3. only then look at arithmetic, which the measurements say is not the constraint.
+
 ## 8h. What the host cost is not
 
 The 25 us per operation that §8g leaves unexplained was chased one step further, and three more

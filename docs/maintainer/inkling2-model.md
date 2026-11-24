@@ -167,6 +167,24 @@ the alternation splits them (`I'll` then `'ve`), and trailing whitespace becomes
 The C++ scanner is written against that file, so the pattern is the authority rather than anyone's
 reading of it.
 
+## 9g. What the encoder still needs, exactly
+
+The pre-tokeniser split is implemented and checked. The rest of the encoder is pinned down by the
+file itself, so nothing here needs guessing:
+
+- `model.merges` is an array of **42,4413 two-element arrays** (`[["i","n"], ["e","r"], ...]`), the
+  index being the rank - not the "a b" strings some tokenizers use.
+- `model.vocab` maps the byte-mapped token string to its id, with 188 single-byte symbols present, so
+  the GPT-2 bytes-to-unicode bijection is the right alphabet.
+- `added_tokens` is 60 entries of `{content, id, lstrip, rstrip, single_word, normalized, special}`
+  and all of them so far are `special: true`, which means they are extracted before the split rather
+  than competing with it.
+- `end_of_word_suffix` and `continuing_subword_prefix` are null, so there is no `</w>` bookkeeping.
+
+So the remaining work is the byte bijection, a ranked merge table over it, added-token extraction,
+and the inverse for decoding - testable end to end against `transformers`, which encodes the same
+strings with the same file.
+
 ## 9d. Runbook: measuring on an RTX 4080 SUPER
 
 The 32 GB card holds the pass-through artifact as it stands, so nothing has to be re-converted.

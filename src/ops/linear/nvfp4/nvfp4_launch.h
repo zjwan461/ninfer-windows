@@ -14,6 +14,11 @@ void launch_nvfp4_gather_gemv(const Tensor& x, const Weight* table, const std::i
                               int slot, const Weight& extents, Tensor& out,
                               cudaStream_t stream);
 
+// Gather product accumulated into an fp32 buffer, scaled by `scales[slot]` from device memory.
+void launch_nvfp4_gather_accumulate(const Tensor& x, const Weight* table,
+                                    const std::int32_t* slots, int slot, const Weight& extents,
+                                    const float* scales, Tensor& acc, cudaStream_t stream);
+
 void launch_nvfp4_generic_gemv(const Tensor& x, const Weight& weight, Tensor& out,
                                cudaStream_t stream);
 

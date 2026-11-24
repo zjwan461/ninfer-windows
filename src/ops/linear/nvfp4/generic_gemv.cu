@@ -122,7 +122,72 @@ __global__ void nvfp4_gather_gemv_kernel(const __nv_bfloat16* __restrict__ x,
     }
 }
 
+// The same product, accumulated into an fp32 buffer with the expert's router weight, which comes
+// from device memory. One launch instead of a product and then an add.
+__global__ void nvfp4_gather_accumulate_kernel(const __nv_bfloat16* __restrict__ x,
+                                               const Weight* __restrict__ table,
+                                               const std::int32_t* __restrict__ slots, int slot,
+                                               const float* __restrict__ scales,
+                                               float* __restrict__ acc, int rows, int k) {
+    const int warps_per_block = blockDim.x / 32;
+    const int row = blockIdx.x * warps_per_block + threadIdx.x / 32;
+    if (row >= rows) { return; }
+    const int slot_index = slots[slot];
+    const Weight weight = table[slot_index];
+    const auto* codes = static_cast<const std::uint8_t*>(weight.qdata);
+    const auto* block_scales = static_cast<const std::uint8_t*>(weight.scales);
+    const int lane = threadIdx.x % 32;
+    const int groups = k / 16;
+    const std::int64_t code_base = std::int64_t(row) * (k / 2);
+
+    float accumulator = 0.0F;
+    for (int group = lane; group < groups; group += 32) {
+        const std::uint32_t* words =
+            reinterpret_cast<const std::uint32_t*>(codes + code_base + group * 8);
+        const std::uint32_t lo = words[0];
+        const std::uint32_t hi = words[1];
+        const float scale =
+            decode_nvfp4_e4m3(block_scales[generic_scale_offset(row, group, groups)]);
+        const int base = group * 16;
+#pragma unroll
+        for (int pair = 0; pair < 4; ++pair) {
+            const float2 values = decode_nvfp4_e2m1x2(std::uint8_t(lo >> (8 * pair)));
+            accumulator += scale * (values.x * __bfloat162float(x[base + 2 * pair]) +
+                                    values.y * __bfloat162float(x[base + 2 * pair + 1]));
+        }
+#pragma unroll
+        for (int pair = 0; pair < 4; ++pair) {
+            const float2 values = decode_nvfp4_e2m1x2(std::uint8_t(hi >> (8 * pair)));
+            accumulator += scale * (values.x * __bfloat162float(x[base + 8 + 2 * pair]) +
+                                    values.y * __bfloat162float(x[base + 8 + 2 * pair + 1]));
+        }
+    }
+#pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        accumulator += __shfl_xor_sync(0xffffffffu, accumulator, offset);
+    }
+    if (lane == 0) {
+        acc[row] += scales[slot] * (accumulator / weight.weight_scale_divisor);
+    }
+}
+
 } // namespace
+
+void launch_nvfp4_gather_accumulate(const Tensor& x, const Weight* table,
+                                    const std::int32_t* slots, int slot, const Weight& extents,
+                                    const float* scales, Tensor& acc, cudaStream_t stream) {
+    ninfer::ops::op_counters().expert_gemv.fetch_add(1, std::memory_order_relaxed);
+    const int rows = extents.n;
+    const int k = extents.k;
+    if (rows <= 0 || k <= 0) { return; }
+    constexpr int kThreads = 256;
+    const int warps = kThreads / 32;
+    const auto blocks = static_cast<unsigned>((rows + warps - 1) / warps);
+    nvfp4_gather_accumulate_kernel<<<blocks, kThreads, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(x.data), table, slots, slot, scales,
+        static_cast<float*>(acc.data), rows, k);
+    CUDA_CHECK(cudaGetLastError());
+}
 
 // `extents` is a host copy of the same entry: the table lives on the device, so the launcher cannot
 // read it, and the only thing the kernel needs from it is the pair of data pointers.

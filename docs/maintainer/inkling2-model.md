@@ -488,6 +488,24 @@ Which is to say: the countable part of the objective is done, and the part that 
 measurement on hardware this machine is not. That distinction belongs in the record rather than in a
 claim that the goal is finished.
 
+## 8g18. What the graph capture is worth, measured
+
+Same binary, same quiet machine, sixty-four steps:
+
+| mode | rate | per token |
+|---|---:|---:|
+| launched | 30.34 tok/s | 32.95 ms |
+| captured | 33.93 tok/s | 29.47 ms |
+
+So the driver and CPU side of issuing every call is **3.5 ms a token** - about three microseconds for each
+of the eleven hundred calls a step makes, which matches the four and a half microseconds measured on a
+launch in isolation. Capturing is worth twelve percent and is already in place.
+
+The rest, **26 ms, is on the device** - and at 120 W of a 500 W cap the device is idle for much of it.
+Since the launch cost is now paid once per step, that idle time is not the driver: it is kernels waiting
+on each other, each too small to fill seventy-eight SMs. Which is the argument for fusing operations into
+larger ones, and against counting launches as if they were the cost.
+
 ## 8g16. Handover state
 
 Where this stands, for whoever picks it up:

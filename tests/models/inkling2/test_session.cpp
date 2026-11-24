@@ -95,10 +95,21 @@ int main(int argc, char** argv) {
             }
             session.reset();
             const auto begin = std::chrono::steady_clock::now();
-            for (int step = 0; step < bench_steps; ++step) { session.step(token, nullptr); }
+            // Two clocks: the host time spent queueing the step, and the wall time including the
+            // GPU finishing it. If they are equal the host is the bottleneck and the kernels are
+            // not; that distinction decides whether to optimise arithmetic or bookkeeping.
+            double host_seconds = 0.0;
+            for (int step = 0; step < bench_steps; ++step) {
+                const auto host_begin = std::chrono::steady_clock::now();
+                session.step(token, nullptr);
+                host_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                                             host_begin).count();
+            }
             cudaDeviceSynchronize();
             const auto end = std::chrono::steady_clock::now();
             const double seconds = std::chrono::duration<double>(end - begin).count();
+            std::cout << "host " << (host_seconds / bench_steps * 1e3) << " ms/token, wall "
+                      << (seconds / bench_steps * 1e3) << " ms/token\n";
             std::cout << "session bench: " << bench_steps << " steps in " << seconds << " s -> "
                       << (double(bench_steps) / seconds) << " tok/s (48 visits, context "
                       << session.max_context() << ")\n";

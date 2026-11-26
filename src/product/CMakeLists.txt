@@ -1,4 +1,4 @@
-if(NINFER_WITH_MEDIA)
+if(NINFER_WITH_REMOTE_FETCH)
   add_library(ninfer_media_acquire STATIC
     media_acquire/acquire.cpp
   )

@@ -180,6 +180,48 @@ The warning exists to make sure nobody assumes that, which is the right behaviou
 
 Which closes the open question from section 5: **the chat template did not change in 2.5.**
 
+## 4d. Both Prism packings verified, and they carry the same weights
+
+Phase 0 ran on both packings. Naming follows the source: `bonsai25-PTQ1_0.ninfer` and
+`bonsai25-PQ2_0.ninfer`.
+
+| | PTQ1_0 | PQ2_0 |
+|---|---:|---:|
+| source GGUF | 5.99 GB | 7.25 GB |
+| conversion | 4,067 s | 4,208 s |
+| objects | 714 | 714 |
+| artifact bytes | 5,943,384,576 | 5,943,384,576 |
+| decode, 128 tokens | 143.8 tok/s | 143.9 tok/s |
+| GPU weights | 5.52 GiB | 5.52 GiB |
+
+**Every one of the 714 objects is byte-identical between the two artifacts.** Compared by SHA-256 per
+object: 714 identical, 0 differing, 0 unpaired. The files differ only in container metadata (the
+`--name` and provenance strings), which is why a byte-level `cmp` reports a difference at byte 17 while
+the weights are the same.
+
+That is the answer to "are the packings the same model": yes, and it is now measured rather than read
+off the model card. Two consequences:
+
+- **Quality does not depend on which file you convert.** PTQ1_0's 1.75 bits/weight and PQ2_0's 2.13 are
+  packing efficiencies in the GGUF, not different weights.
+- **The artifact is packing-independent**, so the registry only ever needs one entry per model.
+
+### The one code change it took
+
+`assert_prism_ternary_gguf` rejected the PQ2_0 file outright:
+
+    ValueError: ...PQ2_0.gguf: expected general.file_type in {142, 143}
+
+Bonsai 2.5's PQ2_0 pack declares `general.file_type` **141** while its tensors are type **142**. The
+two numbers are different things - `file_type` is llama.cpp's FTYPE enum, the tensor type is what the
+decoder dispatches on - and Bonsai 2's PTQ1_0 happened to have them equal at 143, which is why the
+assertion looked correct. `tools/convert/sources/prism_gguf.py` now validates what the decoder actually
+needs: at least one PTQ1_0/PQ2_0 tensor, never a mix, with `file_type` only required to be absent or one
+of the values Prism has shipped (41, 141, 142, 143). One test covers both real shapes and a store whose
+only tensor is not ternary.
+
+This was the only compatibility defect found across both packings.
+
 ## 5. What is not verified
 
 - **No conversion has been run.** Everything above is inventory- and source-level. The first

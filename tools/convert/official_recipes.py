@@ -389,6 +389,20 @@ def bonsai2_27b(model, recipe, sources, mtp_layer=None):
         raise ValueError("bonsai2_27b requires --source gguf=PATH.gguf")
     _bonsai_geometry(model, gguf)
     _optional(model, recipe)
+    if "mtp" in model.components and "mtp" not in sources:
+        # Route B: the draft head is in the -mtp GGUF. _optional bound its formats with the default
+        # (model directory) source, so re-assign them with the checkpoint as an explicit source.
+        for name, parameter in list(model.parameters.items()):
+            if not name.startswith("mtp/"):
+                continue
+            # Every draft parameter takes an explicit source: a bare parameter rebind does not
+            # reach the assignment _optional already made, which is why the norms kept reading the
+            # model directory.
+            source = model.source(name, gguf)
+            if parameter.projection:
+                _assign(recipe, name, Q8, source=source)
+            else:
+                recipe.assign(name, method=cast_direct, source=source)
     rotated = set()
     for name, parameter in list(model.parameters.items()):
         if not name.startswith("text/"):
@@ -451,7 +465,12 @@ def bonsai2_27b(model, recipe, sources, mtp_layer=None):
     }
     if "mtp" in model.components:
         layer_format = None if mtp_layer is None else BONSAI_MTP_LAYER_FORMATS[mtp_layer]
-        _bonsai_mtp(model, recipe, sources["mtp"], layer_format)
+        if "mtp" in sources:
+            _bonsai_mtp(model, recipe, sources["mtp"], layer_format)
+        elif layer_format is not None:
+            raise ValueError(
+                f"bonsai2_27b_mtp_{mtp_layer} requantizes a reference MTP layer and needs "
+                "--source mtp=<reference>.ninfer")
     elif mtp_layer is not None:
         raise ValueError(f"bonsai2_27b_mtp_{mtp_layer} requires the mtp component")
     if "vision" in model.components:

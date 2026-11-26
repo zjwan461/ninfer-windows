@@ -72,3 +72,34 @@ Route A already satisfies both acceptance criteria, so Route B has to be justifi
 So Route B is worth building if the shipped head's acceptance is meaningfully higher than the borrowed
 one's 81.2 %, or if conversion without a Qwen3.8 reference matters. Both are cheap to check once the
 mapping exists.
+
+## Route B has a shape mismatch, and it decides the route
+
+Comparing the shipped head against what the artifact's MTP layer expects, name by name:
+
+| artifact `mtp/` parameter | GGUF `blk.64` tensor |
+|---|---|
+| `input_projection` | `nextn.eh_proj` |
+| `hidden_norm` | `nextn.hnorm` |
+| `embedding_norm` | `nextn.enorm` |
+| `final_norm` | `nextn.shared_head_norm` |
+| `layers/0/input_norm` | `attn_norm` |
+| `layers/0/post_attention_norm` | `post_attention_norm` |
+| `layers/0/attention/{query,key,value,output}` | `attn_{q,k,v,output}` |
+| `layers/0/attention/{query_norm,key_norm}` | `attn_{q,k}_norm` |
+| `layers/0/mlp/{gate,up,down}` | `ffn_{gate,up,down}` |
+| **`layers/0/attention/gate`** | **nothing** |
+
+The artifact's MTP layer has **16** parameters; the shipped head has **15** tensors. The one missing on
+the GGUF side is the attention output gate - the projection the main full-attention layers carry as
+`blk.N.attn_gate` [5120, 6144], which `blk.64` does not have.
+
+So Route B is not "read 15 tensors instead of copying 16". Either the shipped draft layer genuinely has
+no output gate, in which case the MTP component needs a configuration flag and the builder must not
+require the parameter - a change to the artifact schema's assumptions, not just a name mapping - or the
+gate is implicit somewhere and has to be reconstructed, which cannot be done from the file.
+
+That reframes the comparison. Route A is measured and works. Route B needs a schema-level change before
+it can load a single tensor, and its payoff (no Qwen3.8 reference at conversion time, a smaller draft
+head) is convenience and a few percent of draft cost. **Route A is the route to ship** unless the
+shipped head's shape turns out to match after all, which the flag would settle once implemented.

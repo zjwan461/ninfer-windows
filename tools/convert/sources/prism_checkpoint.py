@@ -168,7 +168,10 @@ class PrismCheckpoint:
         matrix("embed_tokens.weight", "token_embd.weight")
         matrix("lm_head.weight", "output.weight")
         vector("norm.weight", "output_norm.weight", (h,), norm)
-        layers = self._meta("block_count")
+        # A -mtp GGUF counts its nextn block in block_count (65 for Bonsai 2.5), so the transformer
+        # stack is block_count minus the nextn layers and the draft block sits immediately after it.
+        nextn = self._store.metadata.get("qwen35.nextn_predict_layers") or 0
+        layers = self._meta("block_count") - nextn
         for i in range(layers):
             p, g = f"layers.{i}.", f"blk.{i}."
             vector(p + "input_layernorm.weight", g + "attn_norm.weight", (h,), norm)
@@ -204,6 +207,28 @@ class PrismCheckpoint:
                 d = self._meta("attention.key_length")
                 vector(s + "q_norm.weight", g + "attn_q_norm.weight", (d,), norm)
                 vector(s + "k_norm.weight", g + "attn_k_norm.weight", (d,), norm)
+        # Bonsai 2.5's -mtp GGUFs carry the draft head as one extra nextn block. Its attention query is
+        # fused with the output gate exactly like a main full-attention layer's, so it maps the same way
+        # and the builder performs the same row split.
+        if nextn:
+            b = f"blk.{layers}."
+            m = "mtp."
+            matrix(m + "fc.weight", b + "nextn.eh_proj.weight")
+            vector(m + "pre_fc_norm_embedding.weight", b + "nextn.enorm.weight", (h,), norm)
+            vector(m + "pre_fc_norm_hidden.weight", b + "nextn.hnorm.weight", (h,), norm)
+            vector(m + "norm.weight", b + "nextn.shared_head_norm.weight", (h,), norm)
+            t = m + "layers.0."
+            vector(t + "input_layernorm.weight", b + "attn_norm.weight", (h,), norm)
+            vector(t + "post_attention_layernorm.weight", b + "post_attention_norm.weight", (h,),
+                   norm)
+            for role, name in (("q", "attn_q"), ("k", "attn_k"), ("v", "attn_v")):
+                matrix(t + f"self_attn.{role}_proj.weight", b + name + ".weight")
+            matrix(t + "self_attn.o_proj.weight", b + "attn_output.weight")
+            d = self._meta("attention.key_length")
+            vector(t + "self_attn.q_norm.weight", b + "attn_q_norm.weight", (d,), norm)
+            vector(t + "self_attn.k_norm.weight", b + "attn_k_norm.weight", (d,), norm)
+            for role, name in (("gate", "ffn_gate"), ("up", "ffn_up"), ("down", "ffn_down")):
+                matrix(t + f"mlp.{role}_proj.weight", b + name + ".weight")
         return entries
 
     # SafetensorsSource interface used by qwen3_5._Builder and tensor_source.

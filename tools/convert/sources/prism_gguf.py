@@ -183,8 +183,25 @@ def assert_prism_ternary_gguf(store: GgufStore) -> None:
         raise ValueError(f"{store.path}: expected prism.hadamard.block_size=1024")
     if metadata.get("prism.hadamard.sign_mode") != "explicit":
         raise ValueError(f"{store.path}: expected prism.hadamard.sign_mode=explicit")
-    if metadata.get("general.file_type") not in (PQ2_0_TYPE, PTQ1_0_TYPE):
-        raise ValueError(f"{store.path}: expected general.file_type in {{142, 143}}")
+    # `general.file_type` is llama.cpp's FTYPE enum, which is *not* the tensor type: the Bonsai 2.5
+    # PQ2_0 pack declares 141 while its tensors are type 142, and the Q2_0 pack declares 41 while its
+    # tensors are 42. The decoder is chosen from the tensor types, so that is what gets validated;
+    # file_type only has to be absent or one of the values Prism has shipped.
+    file_type = metadata.get("general.file_type")
+    known_file_types = (41, 141, PQ2_0_TYPE, PTQ1_0_TYPE)
+    if file_type is not None and file_type not in known_file_types:
+        raise ValueError(
+            f"{store.path}: expected general.file_type in {known_file_types}, got {file_type}")
+    ternary = {
+        info.ggml_type for info in store.tensors.values()
+        if info.ggml_type in (PQ2_0_TYPE, PTQ1_0_TYPE)
+    }
+    if not ternary:
+        raise ValueError(
+            f"{store.path}: no PTQ1_0/PQ2_0 tensors; this is not a Prism ternary checkpoint")
+    if len(ternary) > 1:
+        raise ValueError(
+            f"{store.path}: mixes PTQ1_0 and PQ2_0 tensors, which the recipe cannot place")
 
 
 __all__ = [

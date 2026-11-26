@@ -168,26 +168,52 @@ def test_sign_vectors_rejects_length_mismatch_and_bad_values(tmp_path):
             sign_vectors(store)
 
 
-def test_assert_prism_ternary_gguf_validates_required_metadata(tmp_path):
-    good = build_gguf(
+def _ternary_gguf(file_type: int, tensor_type: int) -> bytes:
+    """A minimal Prism ternary store: the required metadata plus one ternary tensor."""
+    return build_gguf(
         {
             "general.architecture": (8, "qwen35"),
             "prism.hadamard.version": (4, 1),
             "prism.hadamard.block_size": (4, 1024),
             "prism.hadamard.sign_mode": (8, "explicit"),
-            "general.file_type": (4, 143),
+            "general.file_type": (4, file_type),
         },
-        [],
+        [("output.weight", (128,), tensor_type, bytes(28 if tensor_type == 143 else 34))],
     )
-    path = tmp_path / "good.gguf"
-    path.write_bytes(good)
-    with GgufStore(path) as store:
-        assert_prism_ternary_gguf(store)
+
+
+def test_assert_prism_ternary_gguf_validates_required_metadata(tmp_path):
+    for name, file_type, tensor_type in (
+        ("ptq1", 143, 143),   # Bonsai 2 and 2.5 PTQ1_0: file_type equals the tensor type
+        ("pq2", 141, 142),    # Bonsai 2.5 PQ2_0: file_type is the FTYPE enum, one below
+    ):
+        path = tmp_path / f"{name}.gguf"
+        path.write_bytes(_ternary_gguf(file_type, tensor_type))
+        with GgufStore(path) as store:
+            assert_prism_ternary_gguf(store)
 
     bad = build_gguf({"general.architecture": (8, "not-qwen35")}, [])
     path2 = tmp_path / "bad.gguf"
     path2.write_bytes(bad)
     with GgufStore(path2) as store:
+        with pytest.raises(ValueError):
+            assert_prism_ternary_gguf(store)
+
+    # A store with no Prism ternary tensor is rejected however its file_type reads.
+    path3 = tmp_path / "no_ternary.gguf"
+    path3.write_bytes(
+        build_gguf(
+            {
+                "general.architecture": (8, "qwen35"),
+                "prism.hadamard.version": (4, 1),
+                "prism.hadamard.block_size": (4, 1024),
+                "prism.hadamard.sign_mode": (8, "explicit"),
+                "general.file_type": (4, 143),
+            },
+            [("output.weight", (128,), 30, bytes(256))],
+        )
+    )
+    with GgufStore(path3) as store:
         with pytest.raises(ValueError):
             assert_prism_ternary_gguf(store)
 

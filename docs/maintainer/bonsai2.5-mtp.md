@@ -101,3 +101,28 @@ What route B needs is what the first estimate said:
 
 So the route is viable and the comparison is still open. The cost is real - the mapping plus a Q4_0
 decoder plus a fixture - but it is a reader, not a schema change.
+
+## Route B is wired; the measurement is what remains
+
+Five commits, each verified against the real file rather than reasoned about:
+
+| step | what it took |
+|---|---|
+| `1545c9c` | Q4_0 block layout `(32, 18)` in the reader |
+| `0de1d9c` | `dequantize_q4_0`: `(nibble - 8) * d`, low nibbles first, checked on a hand-built block |
+| `c5cb744` | 15 name mappings from `blk.64` to the artifact's `mtp.*` |
+| `0e14c8a` | the geometry check must use `block_count - nextn_predict_layers` |
+| `fafe7f5` | the draft head binds to the checkpoint when no `--source mtp=` is given |
+
+Two traps worth recording, because both produce the same misleading error:
+
+1. **A -mtp GGUF counts its nextn block in `block_count`** - 65, not 64. Reading it straight builds a
+   65-layer model, and the geometry check rejects the file before any tensor is read.
+2. **`recipe.assign(..., source=...)` is the only place a source counts.** Rebinding
+   `model.parameters[name] = replace(parameter, source=...)` looks right and does nothing: `_optional`
+   has already recorded an assignment with the default (model directory) source, and the emitter reads
+   that. The fused attention group and the norms both failed this way until the source went into the
+   assignment itself.
+
+The conversion now runs end to end with `--components text,mtp` and no reference artifact. What is left
+is the comparison: acceptance, decode rate, and output identity between the two draft heads.

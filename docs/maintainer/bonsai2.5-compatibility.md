@@ -139,6 +139,47 @@ in `tests/convert/test_prism_gguf.py`.
 Cost: about a day for the Q2_0 decoder, its block-layout row, a synthetic fixture in
 `tests/convert/bonsai_fixtures.py`, and the cross-packing equality test.
 
+## 4c. Phase 0 result: it converts and decodes, with no code change
+
+Ran it. `Ternary-Bonsai-2.5-27B-PTQ1_0.gguf` (5.99 GB), the recipe and the two commands exactly as
+`bonsai-ternary-conversion.md` documents them, with the 2.5 file substituted:
+
+    python3 -m tools.convert.bonsai_base --gguf <2.5>.gguf \
+        --reference qwen3_8_27b_a8.ninfer --out <model dir>
+    python3 -m tools.convert --model <model dir> --recipe bonsai2_27b --components text \
+        --source gguf=<2.5>.gguf --name bonsai25 --out bonsai25.ninfer --device cuda
+
+Both succeeded. The conversion wrote 714 objects into a 5.94 GB artifact in 4,067 s, every ternary
+projection landing as `t5_g128_fp16` and every norm as `bf16` - the same shape as a Bonsai 2 build. No
+source file was modified.
+
+The artifact then loaded and decoded. On the Hopper MIG slice this work runs on:
+
+| measurement | value |
+|---|---|
+| "The capital of France is" | `**Paris**.` |
+| decode, 128 tokens generated | **143.8 tok/s** |
+| text prefill, short prompt | 38-54 ms |
+| GPU weights | 5.52 GiB |
+| planned device total | 6.34 GiB |
+| reasoning mode (the default) | emits a thinking block, then the answer; correct Chinese reply to a Chinese question |
+
+Two caveats on the numbers: this card is **not** the RTX 4080 SUPER, so 143.8 tok/s does not transfer -
+the 4080 SUPER figure in `NINFER_4080S_BASELINE.md` for Bonsai 2 is 91.6 tok/s on a 736 GB/s card. And
+there is no Bonsai 2 artifact on this machine, so this is a first measurement of 2.5, not a comparison
+against 2.
+
+### The template warning was a false alarm, and a useful one
+
+`bonsai_base` prints `chat template: reference DIFFERS FROM the GGUF's` and saves the GGUF's copy as
+`gguf_chat_template.jinja`. Diffed against `tools/chat_templates/qwen3_8.jinja`, all sixty lines of
+difference are NInfer's own documented fork changes - positional system/developer turns,
+`continue_final_message`, and tool-result histories whose user turn was removed - not anything new from
+Prism. So 2.5's template is the upstream Qwen3.8 template, and this engine's fork already covers it.
+The warning exists to make sure nobody assumes that, which is the right behaviour.
+
+Which closes the open question from section 5: **the chat template did not change in 2.5.**
+
 ## 5. What is not verified
 
 - **No conversion has been run.** Everything above is inventory- and source-level. The first

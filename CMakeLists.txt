@@ -11,16 +11,24 @@ if(CMAKE_CUDA_ARCHITECTURES STREQUAL "89")
   set(NINFER_TARGET_COMPUTE_CAPABILITY 89)
 elseif(CMAKE_CUDA_ARCHITECTURES STREQUAL "120a")
   set(NINFER_TARGET_COMPUTE_CAPABILITY 120)
+elseif(NINFER_ALLOW_UNQUALIFIED_ARCH)
+  # Local testing only. A card without FP4 tensor cores takes the degraded route, so nothing here is
+  # a release target and no archive is packaged for it.
+  set(NINFER_TARGET_COMPUTE_CAPABILITY ${CMAKE_CUDA_ARCHITECTURES})
 else()
   message(FATAL_ERROR
     "NInfer supports CMAKE_CUDA_ARCHITECTURES=89 (Ada) or 120a (Blackwell); got "
-    "'${CMAKE_CUDA_ARCHITECTURES}'")
+    "'${CMAKE_CUDA_ARCHITECTURES}'. Set NINFER_ALLOW_UNQUALIFIED_ARCH=ON to build an unsupported "
+    "architecture for local testing.")
 endif()
 
 project(ninfer-windows LANGUAGES C CXX CUDA)
 
 # --- Global settings ---------------------------------------------------------
 option(NINFER_BUILD_APPS "Build the NInfer CLI, server and perplexity evaluator" ON)
+option(NINFER_ALLOW_UNQUALIFIED_ARCH
+  "Allow a compute capability other than 89 or 120a, for local testing only" OFF)
+option(NINFER_WITH_MEDIA "Link the FFmpeg media path (headerless builds set this OFF)" ON)
 option(BUILD_TESTING "Build NInfer tests" OFF)
 option(NINFER_BUILD_BENCHMARKS "Build NInfer benchmarks" OFF)
 
@@ -90,7 +98,11 @@ if(WIN32)
 else()
   set(NINFER_CUDART_TARGET CUDA::cudart)
 endif()
-if(WIN32 OR DEFINED VCPKG_TARGET_TRIPLET)
+if(NOT NINFER_WITH_MEDIA)
+  # Headerless build: the numeric core links against refusing media modules instead of FFmpeg.
+  add_library(ninfer_ffmpeg_dependencies INTERFACE)
+  set(NINFER_FFMPEG_TARGET ninfer_ffmpeg_dependencies)
+elseif(WIN32 OR DEFINED VCPKG_TARGET_TRIPLET)
   find_package(FFMPEG REQUIRED)
   add_library(ninfer_ffmpeg_dependencies INTERFACE)
   target_include_directories(ninfer_ffmpeg_dependencies INTERFACE ${FFMPEG_INCLUDE_DIRS})

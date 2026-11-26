@@ -126,3 +126,38 @@ Two traps worth recording, because both produce the same misleading error:
 
 The conversion now runs end to end with `--components text,mtp` and no reference artifact. What is left
 is the comparison: acceptance, decode rate, and output identity between the two draft heads.
+
+## The comparison, and the decision
+
+Both artifacts on the same prompt, greedy, 128 new tokens, on a quiet card (the no-speculation rates
+agreeing with the earlier 143.8 tok/s baseline is what says the card was quiet):
+
+| artifact | no MTP | draft 2 | acceptance |
+|---|---:|---:|---:|
+| **A** - Qwen3.8's head copied | 143.9 tok/s | 159.0-159.5 tok/s | 81.2 % |
+| **B** - the head from the `-mtp` GGUF | 144.2 tok/s | 161.5-166.4 tok/s | **87.0 %** |
+
+Both produce **byte-identical text with and without speculation**, so the first criterion is met by
+both and is not what separates them.
+
+**Route B wins.** It accepts more (87.0 % against 81.2 %) and decodes faster (161.5-166.4 against
+159.0-159.5), and it needs no Qwen3.8 artifact to convert. The reason is not mysterious: Prism's head is
+Q4_0, a quarter the size of the Q8 head the copy path carries, and a draft step reads it every round.
+
+The margin is smaller than the acceptance gap suggests - 4 % of decode rate for 6 points of acceptance -
+because the draft is a small share of a round; the verify pass over the accepted tokens is the cost that
+does not move.
+
+### What ships
+
+- `--components text,mtp --source gguf=<mtp>.gguf` - the draft head read from the GGUF (route B). This is
+  the documented path.
+- `--source mtp=<reference>.ninfer` still works and still supports the `bonsai2_27b_mtp_q4|q5|q4q5`
+  requantised variants, so nothing that used route A breaks.
+
+### What the numbers do not say
+
+The absolute rates are from a Hopper MIG slice, and they are **1.1x over no-speculation here, not the
+2.1x measured earlier on the same artifacts under heavy contention**. A contended card spends the round
+on the host side, where speculation pays for itself; a quiet one spends it on the verify pass. The 4080
+SUPER figure will land somewhere between and it is the one that matters.

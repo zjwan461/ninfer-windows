@@ -104,6 +104,41 @@ would win). Reading `blk.64` natively is a convenience, not a capability.
 from the GGUF nextn names to the artifact's `mtp/` names, the `nextn.*` norms and `eh_proj`, and the
 `nextn_predict_layers` metadata check. Estimate: 1-2 days including a synthetic fixture.
 
+## 4b. Covering every packing: PTQ1_0, PQ2_0 and Q2_0
+
+The release ships three packings of the same ternary weights, so "support everything" is a question
+about decoders, not about the runtime.
+
+| file | type id | bytes per 128 weights | bits/weight | decoder in this tree |
+|---|---:|---:|---:|---|
+| `PTQ1_0` | 143 | 28 | 1.75 | **yes** - `prism_gguf.decode_ptq1_0` |
+| `PQ2_0` | 142 | 34 | 2.13 | **yes** - `prism_gguf.decode_pq2_0` |
+| `Q2_0` | **42** | 36 | 2.25 | **no** - stock llama.cpp's type, absent from both `GGUF_TYPES` and `_BLOCK_LAYOUT` |
+
+The 36-byte block is measured, not assumed: `output.weight` in the Q2_0 file spans 357,580,800 bytes
+for 1,271,398,400 elements, which is exactly 0.28125 B/elem. What sits in those 36 bytes is **not**
+something to infer from the size - it has to be taken from llama.cpp's `ggml-common.h` for type 42, the
+same upstream source section 1.4 of the design doc already cites for types 142 and 143.
+
+Two consequences worth stating before anyone budgets the work:
+
+**The runtime does not change at all.** The converter's job is to produce `t5_g128_fp16`; an extra GGUF
+type is one more block-layout row plus one more decoder. The `.ninfer` artifact for a Q2_0 input is the
+same artifact as for PTQ1_0 - same formats, same shapes, same kernels.
+
+**Whether Q2_0 is a lossless repack is a question, not an assumption.** Prism states all three are the
+same ternary model and that Q2_0 exists "for stock llama.cpp". If llama.cpp's type 42 stores a per-block
+scale in the same g128 grouping, decoding PTQ1_0 and Q2_0 must yield **bit-identical** ternary codes and
+scales. If it uses a different grouping or an added offset term, it does not - and then Q2_0 is a
+requantisation, PTQ1_0 stays the quality-preferred source, and "support" should say so.
+
+That gives a free oracle: convert both, compare the produced tensors, and the answer falls out with no
+reference model and no GPU time. It is the same shape of check as the existing independent scalar oracle
+in `tests/convert/test_prism_gguf.py`.
+
+Cost: about a day for the Q2_0 decoder, its block-layout row, a synthetic fixture in
+`tests/convert/bonsai_fixtures.py`, and the cross-packing equality test.
+
 ## 5. What is not verified
 
 - **No conversion has been run.** Everything above is inventory- and source-level. The first

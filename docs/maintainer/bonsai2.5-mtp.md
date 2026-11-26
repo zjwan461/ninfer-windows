@@ -73,33 +73,31 @@ So Route B is worth building if the shipped head's acceptance is meaningfully hi
 one's 81.2 %, or if conversion without a Qwen3.8 reference matters. Both are cheap to check once the
 mapping exists.
 
-## Route B has a shape mismatch, and it decides the route
+## Route B: the "missing gate" was my misreading
 
-Comparing the shipped head against what the artifact's MTP layer expects, name by name:
+Correction to an earlier note in this file. I compared the artifact's 16 `mtp/` parameters against the
+shipped head's 15 tensors, found no GGUF counterpart for `layers/0/attention/gate`, and concluded route B
+needed a schema change. That was wrong, and the artifact says so.
 
-| artifact `mtp/` parameter | GGUF `blk.64` tensor |
-|---|---|
-| `input_projection` | `nextn.eh_proj` |
-| `hidden_norm` | `nextn.hnorm` |
-| `embedding_norm` | `nextn.enorm` |
-| `final_norm` | `nextn.shared_head_norm` |
-| `layers/0/input_norm` | `attn_norm` |
-| `layers/0/post_attention_norm` | `post_attention_norm` |
-| `layers/0/attention/{query,key,value,output}` | `attn_{q,k,v,output}` |
-| `layers/0/attention/{query_norm,key_norm}` | `attn_{q,k}_norm` |
-| `layers/0/mlp/{gate,up,down}` | `ffn_{gate,up,down}` |
-| **`layers/0/attention/gate`** | **nothing** |
+For the **main** full-attention layers the converter already splits one fused tensor:
 
-The artifact's MTP layer has **16** parameters; the shipped head has **15** tensors. The one missing on
-the GGUF side is the attention output gate - the projection the main full-attention layers carry as
-`blk.N.attn_gate` [5120, 6144], which `blk.64` does not have.
+    params : attention/query  attention/key  attention/gate  attention/value
+    sources: blk.3.attn_q (rows 0..6143)   blk.3.attn_k   blk.3.attn_q (rows 6144..12287)   blk.3.attn_v
 
-So Route B is not "read 15 tensors instead of copying 16". Either the shipped draft layer genuinely has
-no output gate, in which case the MTP component needs a configuration flag and the builder must not
-require the parameter - a change to the artifact schema's assumptions, not just a name mapping - or the
-gate is implicit somewhere and has to be reconstructed, which cannot be done from the file.
+`attention/query` and `attention/gate` are two halves of `blk.3.attn_q` [5120, 12288]. The shipped
+`blk.64.attn_q` is **[5120, 12288]** - the same fused layout - so the MTP layer's gate comes from the same
+split, and route B needs no schema change at all.
 
-That reframes the comparison. Route A is measured and works. Route B needs a schema-level change before
-it can load a single tensor, and its payoff (no Qwen3.8 reference at conversion time, a smaller draft
-head) is convenience and a few percent of draft cost. **Route A is the route to ship** unless the
-shipped head's shape turns out to match after all, which the flag would settle once implemented.
+What route B needs is what the first estimate said:
+
+1. `bonsai_base` emitting the MTP config when the source GGUF carries `blk.N.nextn.*`.
+2. A `PrismCheckpoint` mapping from the `blk.64` names to the `mtp.` names the builder walks:
+   `nextn.eh_proj` -> `mtp.fc.weight`, `nextn.enorm`/`hnorm`/`shared_head_norm` ->
+   `mtp.pre_fc_norm_embedding`/`pre_fc_norm_hidden`/`norm`, `blk.64.attn_*` ->
+   `mtp.layers.0.self_attn.*`, `attn_norm`/`post_attention_norm` -> `mtp.layers.0.*_layernorm`,
+   `ffn_*` -> `mtp.layers.0.mlp.*`.
+3. Q4_0 decode: llama.cpp's legacy 4-bit block, not one of this converter's formats, so those tensors are
+   decoded and re-quantized rather than copied as stored words.
+
+So the route is viable and the comparison is still open. The cost is real - the mapping plus a Q4_0
+decoder plus a fixture - but it is a reader, not a schema change.

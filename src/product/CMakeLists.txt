@@ -1,10 +1,18 @@
-add_library(ninfer_media_acquire STATIC
-  media_acquire/acquire.cpp
-)
-ninfer_internal_includes(ninfer_media_acquire)
-target_link_libraries(ninfer_media_acquire PRIVATE ${NINFER_CURL_TARGET})
-if(WIN32)
-  target_link_libraries(ninfer_media_acquire PRIVATE ws2_32)
+if(NINFER_WITH_MEDIA)
+  add_library(ninfer_media_acquire STATIC
+    media_acquire/acquire.cpp
+  )
+  ninfer_internal_includes(ninfer_media_acquire)
+  target_link_libraries(ninfer_media_acquire PRIVATE ${NINFER_CURL_TARGET})
+  if(WIN32)
+    target_link_libraries(ninfer_media_acquire PRIVATE ws2_32)
+  endif()
+else()
+  # Headerless build: no libcurl, so acquisition refuses instead of linking.
+  add_library(ninfer_media_acquire STATIC
+    media_acquire/acquire_stub.cpp
+  )
+  ninfer_internal_includes(ninfer_media_acquire)
 endif()
 
 add_library(ninfer_product_prompt_input STATIC

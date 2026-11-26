@@ -45,7 +45,8 @@ include("${CMAKE_CURRENT_LIST_DIR}/sparse_moe/sources.cmake")
 # manifest has contributed, replace their launchers with host stubs that reject
 # the routes, and export NINFER_SM86 for the #if guards in the kernels, models
 # and tests.
-if(CMAKE_CUDA_ARCHITECTURES STREQUAL "86" OR CMAKE_CUDA_ARCHITECTURES STREQUAL "89")
+if(CMAKE_CUDA_ARCHITECTURES STREQUAL "86" OR CMAKE_CUDA_ARCHITECTURES STREQUAL "89"
+   OR (NINFER_ALLOW_UNQUALIFIED_ARCH AND NOT CMAKE_CUDA_ARCHITECTURES STREQUAL "120a"))
   get_target_property(ninfer_ops_sources ninfer_ops SOURCES)
   list(FILTER ninfer_ops_sources EXCLUDE REGEX "nvfp4/.+_w4a4\.cu$")
   # The NVFP4-valued KV-cache kernels quantize with cvt.e2m1x2 (sm_100+). Their launchers are

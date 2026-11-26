@@ -311,9 +311,12 @@ _MTP_CONFIG_FIELDS = (
 def _bonsai_geometry(model, gguf: PrismCheckpoint) -> None:
     config = model.config
     meta = gguf.metadata
+    # A -mtp GGUF counts its nextn block in block_count, so the transformer stack is that minus the
+    # nextn layers; the draft block after it is not part of the text model.
+    nextn = meta.get("qwen35.nextn_predict_layers") or 0
     expected = {
         "hidden_size": meta.get("qwen35.embedding_length"),
-        "num_hidden_layers": meta.get("qwen35.block_count"),
+        "num_hidden_layers": meta.get("qwen35.block_count") - nextn,
         "intermediate_size": meta.get("qwen35.feed_forward_length"),
         "num_attention_heads": meta.get("qwen35.attention.head_count"),
         "num_key_value_heads": meta.get("qwen35.attention.head_count_kv"),

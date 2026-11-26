@@ -52,7 +52,8 @@ from .prism_gguf import (
 from .safetensors import TensorInfo
 
 _TERNARY_TYPES = (PTQ1_0_TYPE, PQ2_0_TYPE)
-_F32, _BF16 = 0, 30
+_F32, _Q4_0, _BF16 = 0, 2, 30
+_Q4_0_BLOCK_BYTES = 18   # ggml_half d (2) + qs[16]; 32 weights per block
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +63,22 @@ class _Entry:
     kind: str  # "matrix" or "vector"
     row_map: np.ndarray | None = None
     vector: Callable[[np.ndarray], np.ndarray] | None = None
+
+
+def dequantize_q4_0(raw: bytes) -> np.ndarray:
+    """Float32 values of a Q4_0 block run: (nibble - 8) * d, low nibbles first.
+
+    llama.cpp's legacy 4-bit block, 32 weights in 18 bytes. Bonsai 2.5's MTP head stores its
+    projections in it, which is the only reason this converter reads the format at all.
+    """
+    if len(raw) % _Q4_0_BLOCK_BYTES:
+        raise ValueError(
+            f"Q4_0 raw byte length {len(raw)} is not a multiple of {_Q4_0_BLOCK_BYTES}")
+    blocks = np.frombuffer(raw, dtype=np.dtype([("d", "<f2"), ("q", "u1", 16)]))
+    low = (blocks["q"] & 0x0F).astype(np.float32) - 8.0
+    high = (blocks["q"] >> 4).astype(np.float32) - 8.0
+    values = np.concatenate((low, high), axis=1) * blocks["d"].astype(np.float32)[:, None]
+    return values.reshape(-1)
 
 
 def grouped_head_sources(nk: int, rep: int) -> np.ndarray:
@@ -235,6 +252,11 @@ class PrismCheckpoint:
         for low, high in self._runs(entry, begin, end):
             if info.ggml_type in _TERNARY_TYPES:
                 pieces.append(dequantize_rows(self._store, entry.gguf, low, high))
+                continue
+            if info.ggml_type == _Q4_0:
+                raw = self._store.read_tensor_raw(entry.gguf, low * k // 32 * 18,
+                                                  high * k // 32 * 18)
+                pieces.append(torch.from_numpy(dequantize_q4_0(raw)).reshape(-1, k))
                 continue
             if info.ggml_type not in (_F32, _BF16):
                 raise ValueError(f"{entry.gguf}: unsupported GGUF type {info.type_name}")

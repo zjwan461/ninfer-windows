@@ -131,6 +131,10 @@ Bonsai 2.5 的产物来自 `zjwan461/bonsai2.5-27b-ninfer`，同一仓库有四�
 `--spec dflash` 会被拒绝。`--max-context` 也会对照产物声明的 `max_position_embeddings` 校验，
 超过直接报错而不是等 serve 拒绝。
 
+**视觉默认打开**：用户自己换到一个带 vision 组件的产物时，`--vision` 会自动勾上并提示（并从此刻起
+让 `--vision-max-tokens` 显现）；用户手动取消过的那一个产物会被记住（按路径），再选回来不会又勾上。
+载入预设属于程序改值，不触发这个自动勾选——预设想关就得关。
+
 不支持的能力不是"灰一下"就算：**切换模型时表单会自动纠正**已选的值（例如从 Qwen 的
 `--spec dflash2` 切到 Bonsai 会自动改成 `--spec mtp`，并提示原因；`--vision`/`--lm-head-draft`
 在不支持的产物上会被取消勾选），避免留下一个"看起来能选、启动必失败"的组合。

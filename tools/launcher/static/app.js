@@ -10,6 +10,10 @@
     fields: [],
     fieldByKey: {},
     artifactInfo: null,
+    //: 用户手动取消 --vision 的 artifact 路径；换回来时不再自动勾上。
+    visionOptOut: new Set(),
+    //: 用户主动换了模型文件（而不是载入预设）时置位，用于决定要不要自动开视觉。
+    visionAutoArmed: false,
     values: {},
     profiles: [],
     profileName: null,
@@ -339,10 +343,15 @@
     if (!field) return;
     const previous = key === "spec" ? String(state.values.spec || "") : "";
     state.values[key] = readControl(field);
+    if (key === "vision") rememberVisionChoice(Boolean(state.values.vision));
     if (key === "spec") applySpecDefaults(previous);
     updateVisibility();
     refreshSpecConstraints();
-    if (key === "artifact") scheduleArtifactInfo();
+    if (key === "artifact") {
+      // 只有「用户自己换模型」才自动开视觉；载入预设是程序改值，预设想关就得关。
+      state.visionAutoArmed = true;
+      scheduleArtifactInfo();
+    }
     schedulePreview();
   }
 
@@ -469,6 +478,17 @@
     }
   }
 
+  // 用户手动取消过 --vision 的 artifact：再选中它时不要自动勾回来。
+  function rememberVisionChoice(enabled) {
+    const info = state.artifactInfo;
+    if (!info || !info.ok || !info.path) return;
+    if (enabled) {
+      state.visionOptOut.delete(info.path);
+    } else {
+      state.visionOptOut.add(info.path);
+    }
+  }
+
   // 把当前配置收敛到该 artifact 真正支持的能力：不支持就自动纠正并说明原因，
   // 而不是留一个"能选但启动必失败"的状态（引擎会 FATAL: missing component）。
   function applyArtifactCapabilities(info) {
@@ -516,6 +536,22 @@
         node.checked = false;
         state.values[key] = false;
         toast(`该 artifact 不含 ${label} 组件，已关闭对应选项`, "err");
+        schedulePreview();
+      } else if (
+        key === "vision" &&
+        known &&
+        supported &&
+        !node.checked &&
+        state.visionAutoArmed &&
+        !state.visionOptOut.has(info.path)
+      ) {
+        // 产物自带视觉就默认打开：勾掉一个模型明明支持的能力没有意义，
+        // 用户主动取消过的（visionOptOut）除外。
+        node.checked = true;
+        state.values.vision = true;
+        state.visionAutoArmed = false;
+        updateVisibility();  // --vision-max-tokens 依赖 vision=true 才显示
+        toast("该 artifact 含 vision 组件，已自动启用 --vision");
         schedulePreview();
       }
     }

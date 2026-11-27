@@ -95,6 +95,7 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex-wrap: nowrap;
   padding: 4px 6px 14px;
   border-bottom: 1px solid var(--line-soft);
   margin-bottom: 8px;
@@ -114,10 +115,30 @@ body {
   flex: none;
 }
 
-.brand-text { display: flex; flex-direction: column; line-height: 1.15; min-width: 0; }
-.brand-text .name { font-weight: 650; letter-spacing: .2px; }
-.brand-text .sub { font-size: 11px; color: var(--text-faint); letter-spacing: .6px; }
-.brand .ver { margin-left: auto; font-size: 10.5px; color: var(--text-faint); font-family: var(--mono); }
+.brand-text { display: flex; flex-direction: column; line-height: 1.2; min-width: 0; flex: 1; }
+.brand-text .name { font-weight: 650; letter-spacing: .2px; white-space: nowrap; }
+.brand-text .sub {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--text-faint);
+  letter-spacing: .6px;
+  white-space: nowrap;
+}
+/* 引擎标识可能很长（如「引擎 build-5060ti」）：截断，不挤占品牌名 */
+.brand .ver {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.brand .ver:empty { display: none; }
 
 .nav { display: flex; flex-direction: column; gap: 3px; }
 
@@ -465,8 +486,9 @@ summary:focus-visible {
 .field-row .label .name { font-size: 13px; color: var(--text); }
 .field-row .label .hint { color: var(--text-faint); font-size: 11.5px; margin-top: 3px; line-height: 1.45; }
 .field-row .control { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0; }
-.field-row .control .input { width: 100%; max-width: 540px; }
-.field-row .control .input.num { width: 150px; }
+.field-row .control .input { width: 100%; max-width: 560px; }
+.field-row .control .input.num { width: 220px; }
+.field-row .control .select { min-width: 220px; max-width: 560px; }
 
 .field-row .control .artifact-hint {
   flex-basis: 100%;
@@ -490,21 +512,21 @@ summary:focus-visible {
 .hint.spec-note { flex-basis: 100%; }
 
 .group {
-  background: linear-gradient(180deg, var(--surface), var(--bg-shell) 140%);
-  border: 1px solid var(--line);
+  background: #0e151e;
+  border: 1px solid var(--line-soft);
   border-radius: var(--radius);
   padding: 4px 18px 12px;
   margin-bottom: var(--gap);
-  box-shadow: var(--shadow-sm);
 }
 
 .group > h3 {
-  margin: 14px 0 6px;
-  font-size: 12px;
+  margin: 16px 0 4px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 13px;
   font-weight: 650;
-  letter-spacing: .6px;
-  text-transform: uppercase;
-  color: var(--text-faint);
+  letter-spacing: .2px;
+  color: var(--text);
   display: flex;
   align-items: center;
   gap: 8px;
@@ -513,10 +535,10 @@ summary:focus-visible {
 .group > h3::before {
   content: "";
   width: 3px;
-  height: 11px;
+  height: 12px;
   border-radius: 2px;
   background: var(--accent);
-  opacity: .8;
+  flex: none;
 }
 
 details.advanced { margin-top: 10px; }

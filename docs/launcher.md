@@ -59,8 +59,13 @@ start-launcher.bat
 
 ## 下载模型
 
-「下载」页把 README 里的产物清单做成了下拉：Bonsai 2 27B、Qwen3.8-27B int8 prefill、Qwen3.8-27B 官方、
-Swift 1.5、Qwen3.6-35B-A3B；也可以选「自定义」填任意 `owner/name` + 仓库内文件名。
+「下载」页把 README 里的产物清单做成了下拉：**Bonsai 2.5 27B（推荐）**、Bonsai 2.5 27B 纯文本、
+Bonsai 2 27B、Qwen3.8-27B int8 prefill、Qwen3.8-27B 官方、Swift 1.5、Qwen3.6-35B-A3B；也可以选
+「自定义」填任意 `owner/name` + 仓库内文件名。
+
+Bonsai 2.5 的产物来自 `zjwan461/bonsai2.5-27b-ninfer`，同一仓库有四个尺寸：`bonsai25-VL-MTP.ninfer`
+（6.23 GiB，文本+视觉+MTP，下载页默认项）、`bonsai25-VL.ninfer`（5.81 GiB）、`bonsai25-MTP.ninfer`
+（6.29 GiB）、`bonsai25.ninfer`（5.54 GiB，纯文本）。
 
 - 走 `https://huggingface.co/<repo>/resolve/main/<file>`；镜像可选 `hf-mirror.com` 或自定义端点
   （上一次选择会记进 `settings.json` 的 `hf_endpoint`）；
@@ -134,10 +139,18 @@ Swift 1.5、Qwen3.6-35B-A3B；也可以选「自定义」填任意 `owner/name` 
 
 - 档案 = 一整套参数（含引擎路径与模型文件），保存在
   `%LOCALAPPDATA%\NInfer-Launcher\profiles.json`；
-- 首次运行自动导入五个内置预设，对应仓库的 `start-*.bat`：
-  `Qwen3.8-27B int8 · 4080s/4090`、`Bonsai2-27B VL · 4080s/4090`、`Bonsai2-27B VL · 5060Ti`；
+- 首次运行自动导入内置预设，对应仓库的 `start-*.bat`：
+  `Qwen3.8-27B int8 · 4080s/4090`、`Bonsai2.5-27B VL · 4080s/4090/5060Ti`、
+  `Bonsai2-27B VL · 4080s/4090/5060Ti`（DSpine 的两个预设只在装了对应 artifact 时出现）；
+- **按显卡自动选预设**：第一次打开（还没有「上次使用」）时读 `nvidia-smi`，先按型号认
+  （4080/4090/5060），认不出再按显存分档（≤20 GiB → 16 GB 档，≥40 GiB → 旗舰档，其余按 24 GiB 档），
+  然后载入对应的 2.5 预设并提示原因。型号与显存都读不到时不猜，保持原样；用户手动选过之后
+  就不再自动切换。
 - 支持另存为、删除、恢复内置预设；「导出 .bat」会生成与 `start-*.bat` 同形的脚本，
-  可继续用 `NINFER_SERVER` / `%*` 覆盖。
+  可继续用 `NINFER_SERVER` / `%*` 覆盖；
+- `start-*.bat` **仍然是独立可用的**：不装 Python、不开 launcher 也能直接起 serve。为了不让
+  这两份参数各写各的，`tests/launcher/test_config.py` 里有一条测试把每个脚本的固定参数与对应预设
+  逐项比对（顺序不敏感，内容必须一致）——改了一边而忘了另一边会直接测试失败。
 
 ## 进程生命周期
 

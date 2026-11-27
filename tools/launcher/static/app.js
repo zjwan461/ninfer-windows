@@ -796,8 +796,18 @@
       if (result.last) {
         select.value = result.last;
         state.profileName = result.last;
+        $("#profile-status").textContent = `${state.profiles.length} 个档案`;
+      } else if (result.suggested) {
+        // 首次运行：没有「上次使用」时按显卡挑一个预设，用户之后自己选就不再干预。
+        select.value = result.suggested;
+        loadProfile();
+        const card = result.gpu && result.gpu.name ? `（${result.gpu.name}）` : "";
+        $("#profile-status").textContent =
+          `${state.profiles.length} 个档案 · 已按显卡自动选择${card}`;
+        toast(`已按显卡自动载入档案「${result.suggested}」${card}`);
+      } else {
+        $("#profile-status").textContent = `${state.profiles.length} 个档案`;
       }
-      $("#profile-status").textContent = `${state.profiles.length} 个档案`;
     } catch (error) {
       $("#profile-status").textContent = "读取档案失败：" + error.message;
     }

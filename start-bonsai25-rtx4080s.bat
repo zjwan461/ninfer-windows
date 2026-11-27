@@ -1,0 +1,97 @@
+@echo off
+setlocal
+rem NInfer: OpenAI + Anthropic compatible server for Ternary Bonsai 2.5 27B (text + vision + MTP).
+rem Standalone: needs no Python and no launcher. The equivalent launcher profile is
+rem "Bonsai2.5-27B VL · 4080s"; keep the two in step.
+rem Tuned for the RTX 4080 SUPER profile (NINFER_TARGET_SM_COUNT=80) -- see start-bonsai25-rtx4090.bat
+rem for the 128-SM RTX 4090 build. Only --prefill-chunk differs between the two (1408 -> 1024, the
+rem 80-SM wave geometry fills more easily with the smaller chunk); everything else adapts at
+rem runtime (KV capacity follows the measured free VRAM).
+rem
+rem Thinking/output budget is model-related, not card-related: all three Bonsai launchers
+rem (4090 / 4080s / 5060Ti) keep thinking enabled with a 32768-token thinking ceiling and a
+rem 65536-token total output budget. The budget is a ceiling, not a target; easy requests stop
+rem early. Lower it per deployment with NINFER_SERVE_ARGS if latency matters.
+rem
+rem Usage:
+rem   start-bonsai25-rtx4080s.bat [MODEL] [extra ninfer-serve args...]
+rem     MODEL  path to a .ninfer file, or to a directory containing one
+rem            (omit it to use the resolution order below)
+rem
+rem Model resolution, first hit wins:
+rem   1. the first command-line argument
+rem   2. NINFER_MODEL      full path to a .ninfer file
+rem   3. NINFER_MODEL_DIR  directory holding bonsai25-VL-MTP.ninfer
+rem   4. models\bonsai25-VL-MTP.ninfer beside this script
+rem
+rem Binary: set NINFER_SERVER to use a ninfer-serve.exe somewhere else.
+rem Extra flags can also come from NINFER_SERVE_ARGS.
+rem Download the artifact first:
+rem   hf download zjwan461/bonsai2.5-27b-ninfer bonsai25-VL-MTP.ninfer --local-dir models
+rem API http://127.0.0.1:8080/v1   Monitor http://127.0.0.1:8080/monitor
+
+set "BIN=%~dp0"
+set "SCRIPT_NAME=%~nx0"
+set "DEFAULT_NAME=bonsai25-VL-MTP.ninfer"
+if not defined NINFER_SERVER set "NINFER_SERVER=%BIN%ninfer-serve.exe"
+
+set "MODEL=%~1"
+if not defined MODEL goto :model_from_environment
+shift
+goto :resolve_model
+
+:model_from_environment
+if defined NINFER_MODEL set "MODEL=%NINFER_MODEL%"
+if not defined MODEL if defined NINFER_MODEL_DIR set "MODEL=%NINFER_MODEL_DIR%\%DEFAULT_NAME%"
+if not defined MODEL set "MODEL=%BIN%models\%DEFAULT_NAME%"
+
+:resolve_model
+rem Everything after MODEL is forwarded to ninfer-serve. %* is unusable here: cmd's shift does
+rem not drop the first argument from %*, so the remaining arguments are collected explicitly.
+set "EXTRA="
+:collect_extra
+if "%~1"=="" goto :expand_directory
+set "EXTRA=%EXTRA% "%~1""
+shift
+goto :collect_extra
+
+:expand_directory
+rem A directory is accepted as well: expand it to the .ninfer file inside it.
+if not exist "%MODEL%\" goto :check_model
+set "MODEL_DIR=%MODEL%"
+set "MODEL="
+for %%F in ("%MODEL_DIR%\*.ninfer") do if not defined MODEL set "MODEL=%%~fF"
+if defined MODEL goto :check_model
+echo No .ninfer file found in directory: %MODEL_DIR%
+goto :usage
+
+:check_model
+if not defined MODEL goto :usage
+if not exist "%MODEL%" goto :usage
+if not exist "%NINFER_SERVER%" (
+  echo Missing %NINFER_SERVER%
+  echo Put this launcher beside ninfer-serve.exe, or set NINFER_SERVER.
+  pause
+  exit /b 1
+)
+
+echo Starting Ternary Bonsai 2.5 27B at http://127.0.0.1:8080/v1
+echo Model: %MODEL%
+"%NINFER_SERVER%" "%MODEL%" ^
+  --host 127.0.0.1 --port 8080 --model-id bonsai25-27b ^
+  --max-context 262144 --kv-capacity auto --kv-dtype rk4v4-e8 --max-concurrency 3 ^
+  --prefill-chunk 1024 --default-max-tokens 65536 --default-thinking-budget 32768 ^
+  --spec mtp --draft-tokens 2 --lm-head-draft --ngram chain --vision %EXTRA% %NINFER_SERVE_ARGS%
+set "SERVE_EXIT=%ERRORLEVEL%"
+pause
+exit /b %SERVE_EXIT%
+
+:usage
+echo Model not found.
+echo Usage: %SCRIPT_NAME% [MODEL] [extra ninfer-serve args...]
+echo   MODEL  path to a .ninfer file, or to a directory containing one
+echo Resolution order: argument, NINFER_MODEL, NINFER_MODEL_DIR, %BIN%models\%DEFAULT_NAME%
+echo Download it with:
+echo   hf download zjwan461/bonsai2.5-27b-ninfer %DEFAULT_NAME% --local-dir models
+pause
+exit /b 1

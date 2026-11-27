@@ -126,6 +126,15 @@ Two consequences worth stating before anyone budgets the work:
 type is one more block-layout row plus one more decoder. The `.ninfer` artifact for a Q2_0 input is the
 same artifact as for PTQ1_0 - same formats, same shapes, same kernels.
 
+**Answered: Q2_0 is a lossless repack.** Decoding `blk.0.ffn_up.weight` from all three files gives
+bit-identical trits - PTQ1_0 vs PQ2_0 and PTQ1_0 vs Q2_0 both compare equal element by element - and the
+scales are equal too once each PTQ1_0 scale is repeated twice, because Q2_0 splits the 128-weight block
+into two 64-weight blocks that carry the same half-precision scale twice. Reconstructed float values differ
+by exactly 0.0. So the packings differ in storage only: PTQ1_0 packs five trits into a base-3 byte (28 B per
+128 weights), PQ2_0 and Q2_0 each give a trit a 2-bit slot (34 B and 36 B), and only Q2_0 halves the scale
+group to 64. That also means a Q2_0 input, if the decoder existed, would produce a byte-identical `.ninfer`
+artifact - the only reason to add it is so one downloaded file serves both engines.
+
 **Whether Q2_0 is a lossless repack is a question, not an assumption.** Prism states all three are the
 same ternary model and that Q2_0 exists "for stock llama.cpp". If llama.cpp's type 42 stores a per-block
 scale in the same g128 grouping, decoding PTQ1_0 and Q2_0 must yield **bit-identical** ternary codes and

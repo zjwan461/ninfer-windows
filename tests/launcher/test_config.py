@@ -429,3 +429,124 @@ def test_local_artifacts_component_surface(
         assert component not in info.components, (filename, info.components)
     assert info.proposal is True
     assert info.max_context is not None
+
+# --------------------------------------------------------------------- .bat 对照
+
+_SCRIPT_PAIRS = (
+    ("start-bonsai25-rtx4080s.bat", "Bonsai2.5-27B VL · 4080s"),
+    ("start-bonsai25-rtx4090.bat", "Bonsai2.5-27B VL · 4090"),
+    ("start-bonsai25-rtx5060ti.bat", "Bonsai2.5-27B VL · 5060Ti"),
+    ("start-bonsai-rtx4080s.bat", "Bonsai2-27B VL · 4080s"),
+    ("start-bonsai-rtx4090.bat", "Bonsai2-27B VL · 4090"),
+    ("start-bonsai-rtx5060ti.bat", "Bonsai2-27B VL · 5060Ti"),
+)
+
+
+def _pairs(tokens: list[str]) -> set[tuple[str, str]]:
+    """argv 令牌 → (flag, value) 集合；布尔开关的值记为空串。
+
+    比较用集合而非序列：脚本按「网络/容量/投机」的人读顺序写，预设按 FIELDS 的分组顺序生成，
+    两者对 serve 等价，顺序不是不变式，内容才是。
+    """
+
+    pairs: set[tuple[str, str]] = set()
+    index = 0
+    while index < len(tokens):
+        flag = tokens[index]
+        if not flag.startswith("--"):
+            index += 1
+            continue
+        value = ""
+        if index + 1 < len(tokens) and not tokens[index + 1].startswith("--"):
+            value = tokens[index + 1]
+            index += 1
+        pairs.add((flag, value))
+        index += 1
+    return pairs
+
+
+def _script_args(path: Path) -> list[str]:
+    """一个 start-*.bat 里传给 serve 的固定参数（不含二进制、模型与 %EXTRA%）。"""
+
+    text = path.read_text(encoding="utf-8")
+    start = text.index('"%NINFER_SERVER%" "%MODEL%"')
+    body = text[start:].split("%EXTRA%")[0]
+    body = body.split('"%MODEL%"', 1)[1]
+    body = body.replace("^", " ").replace("\r", " ").replace("\n", " ")
+    return body.split()
+
+
+@pytest.mark.parametrize(("script", "preset_name"), _SCRIPT_PAIRS)
+def test_script_matches_launcher_preset(script: str, preset_name: str) -> None:
+    """.bat 可以独立使用，预设又要在界面里等价 —— 两边任何一处改了都必须同步。
+
+    脚本解析出来的是 ``--flag value`` 序列；预设走 ``build_argv`` 得到同样的序列，逐项比较即可
+    发现漂移（历史上这两份是各写各的）。
+    """
+
+    presets = {preset["name"]: preset["values"] for preset in config.builtin_presets()}
+    values = dict(presets[preset_name])
+    # 脚本里的模型固定是同目录 models\ 下的默认名，预设指向解析出来的绝对路径。
+    values["artifact"] = ""
+    argv = config.build_argv(values)
+    expected = argv[1:]  # 去掉二进制
+    assert _pairs(_script_args(config.REPO_ROOT / script)) == _pairs(expected)
+
+
+# ---------------------------------------------------------------- 按卡推荐预设
+
+
+def _preset_names() -> list[str]:
+    return [preset["name"] for preset in config.builtin_presets()]
+
+
+@pytest.mark.parametrize(
+    ("gpu", "want_card"),
+    (
+        ({"ok": True, "name": "NVIDIA GeForce RTX 4080 SUPER", "total_mib": 24564}, "4080s"),
+        ({"ok": True, "name": "NVIDIA GeForce RTX 4090", "total_mib": 24564}, "4090"),
+        ({"ok": True, "name": "NVIDIA GeForce RTX 5060 Ti", "total_mib": 16311}, "5060Ti"),
+        # 型号认不出就按显存分档：16 GB 归 5060Ti，24 GB 归 4080s 档。
+        ({"ok": True, "name": "Tesla V100", "total_mib": 16384}, "5060Ti"),
+        ({"ok": True, "name": "Tesla A10", "total_mib": 24576}, "4080s"),
+        # 型号和显存都拿不到（MIG 切片）时不猜，保持界面原样。
+        ({"ok": False, "name": "NVIDIA H20-3e", "total_mib": None}, None),
+        ({"ok": False}, None),
+        (None, None),
+    ),
+)
+def test_suggest_preset_by_card(gpu: dict[str, object] | None, want_card: str | None) -> None:
+    names = _preset_names()
+    suggested = config.suggest_preset(gpu, names)
+    if want_card is None:
+        assert suggested is None
+        return
+    assert suggested is not None
+    assert suggested in names
+    assert suggested.endswith("· " + want_card)
+    # 推荐出来的必须是 2.5（当前代），2.0 的预设还在但不该被推荐。
+    assert suggested.startswith("Bonsai2.5-27B")
+
+
+def test_suggest_preset_prefers_available_family() -> None:
+    """2.5 的预设没导入时退回到 2.0，而不是给一个点不动的名字。"""
+
+    names = [name for name in _preset_names() if not name.startswith("Bonsai2.5")]
+    gpu = {"ok": True, "name": "NVIDIA GeForce RTX 4080 SUPER", "total_mib": 24564}
+    assert config.suggest_preset(gpu, names) == "Bonsai2-27B VL · 4080s"
+
+
+def test_catalog_lists_bonsai25_and_its_preset() -> None:
+    entries = {entry["filename"]: entry for entry in config.MODEL_CATALOG}
+    entry = entries["bonsai25-VL-MTP.ninfer"]
+    assert entry["repo"] == "zjwan461/bonsai2.5-27b-ninfer"
+    assert entry["preset"] in _preset_names()
+    # 目录里标注的预设必须是真实存在的，否则界面上的「使用预设」是个死链接。
+    # DSpine 的两个预设只在对应的 artifact 装在同目录时才生成（见 builtin_presets），
+    # 目录里那条因此允许缺席。
+    conditional = {"Qwen3.8-27B int8 + DSpine · 4080s"}
+    names = set(_preset_names())
+    for item in config.MODEL_CATALOG:
+        preset = item["preset"]
+        if preset and preset not in conditional:
+            assert preset in names, item["filename"]

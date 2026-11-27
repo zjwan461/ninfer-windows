@@ -30,6 +30,7 @@ if __package__ in (None, ""):
 
 from tools.launcher import config  # noqa: E402
 from tools.launcher.downloads import DownloadManager  # noqa: E402
+from tools.launcher import process  # noqa: E402
 from tools.launcher.process import GpuMonitor, LogBus, ServeManager, kill_pid, port_in_use  # noqa: E402
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -394,7 +395,21 @@ def build_app(store: config.Store, ui_port: int) -> FastAPI:
     # ------------------------------------------------------------- 档案
     @app.get("/api/profiles")
     async def profiles() -> dict[str, Any]:
-        return {"profiles": store.list_profiles(), "last": store.last_profile}
+        entries = store.list_profiles()
+        # 首次运行（还没有「上次使用」）时按显卡推荐一个已导入的预设；用户选过之后就不再干预。
+        gpu = await asyncio.to_thread(process.read_gpu)
+        suggested = config.suggest_preset(gpu, [entry["name"] for entry in entries])
+        return {
+            "profiles": entries,
+            "last": store.last_profile,
+            "suggested": suggested,
+            "gpu": {"name": gpu.get("name"), "total_mib": gpu.get("total_mib"),
+                    "ok": gpu.get("ok")},
+        }
+
+    @app.get("/api/gpu")
+    async def gpu_info() -> dict[str, Any]:
+        return await asyncio.to_thread(process.read_gpu)
 
     @app.post("/api/profiles")
     async def save_profile(body: ProfileBody) -> dict[str, Any]:

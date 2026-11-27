@@ -41,6 +41,23 @@ HF_MIRRORS: tuple[tuple[str, str], ...] = (
 #: （2026-10 核对），``preset`` 是开箱可用的内置档案（空表示要用同架构档案换 artifact）。
 MODEL_CATALOG: tuple[dict[str, Any], ...] = (
     {
+        "label": "Ternary Bonsai 2.5 27B（文本+视觉+MTP，推荐）",
+        "repo": "zjwan461/bonsai2.5-27b-ninfer",
+        "filename": "bonsai25-VL-MTP.ninfer",
+        "size_gib": 6.23,
+        "preset": "Bonsai2.5-27B VL · 4080s",
+        "note": "2.5 同上代一样只支持 --spec mtp；同一仓库另有纯文本 bonsai25.ninfer（5.54 GiB）、"
+                "文本+MTP、文本+视觉三个更小的产物",
+    },
+    {
+        "label": "Ternary Bonsai 2.5 27B（纯文本，最小）",
+        "repo": "zjwan461/bonsai2.5-27b-ninfer",
+        "filename": "bonsai25.ninfer",
+        "size_gib": 5.54,
+        "preset": "",
+        "note": "无 vision、无 mtp 组件：载入 Bonsai2.5 预设后取消「启用视觉」并清空 --spec 即可",
+    },
+    {
         "label": "Ternary Bonsai 2 27B（文本+视觉+MTP）",
         "repo": "jgamboa/Ternary-Bonsai-2-27B-NInfer-4090",
         "filename": "bonsai2_27b_vl_mtp_q4q5.ninfer",
@@ -1061,6 +1078,63 @@ def validate(values: dict[str, Any]) -> tuple[list[str], list[str]]:
 # --------------------------------------------------------------------- 预设
 
 
+#: 显卡型号关键字 → 预设的卡型后缀。先按名字精确认，认不出再按显存分档。
+_GPU_CARD_HINTS: tuple[tuple[str, str], ...] = (
+    ("5060", "5060Ti"),
+    ("5070", "5060Ti"),
+    ("4090", "4090"),
+    ("4080", "4080s"),
+)
+#: 预设家族，从新到旧；同一次建议优先挑最新的模型。
+_PRESET_FAMILIES: tuple[str, ...] = ("Bonsai2.5-27B VL", "Bonsai2-27B VL")
+
+
+def card_bucket(gpu: dict[str, Any] | None) -> str | None:
+    """从 nvidia-smi 的读数判断该用哪一档卡型预设。
+
+    先按型号名认（4080/4090/5060 的 SM 数与显存差异是预设的全部依据），名字认不出再按显存分档：
+    ≤20 GiB 当作 16 GB 档，≥40 GiB 当作大卡旗舰，其余按 24 GiB 档处理。
+    """
+
+    if not gpu:
+        return None
+    name = str(gpu.get("name") or "").lower()
+    if not name and not gpu.get("ok"):
+        return None
+    for needle, card in _GPU_CARD_HINTS:
+        if needle in name:
+            return card
+    total = gpu.get("total_mib")
+    if total is None:
+        # 型号没认出来、显存也读不到：不猜，界面就保持原样。
+        return None
+    try:
+        total = float(total)
+    except (TypeError, ValueError):
+        return None
+    if total <= 20480:
+        return "5060Ti"
+    if total >= 40960:
+        return "4090"
+    return "4080s"
+
+
+def suggest_preset(
+    gpu: dict[str, Any] | None, available: Iterable[str]
+) -> str | None:
+    """给这张卡推荐一个已存在的档案名；没有合适的返回 None（界面就保持原样）。"""
+
+    card = card_bucket(gpu)
+    if not card:
+        return None
+    names = set(available)
+    for family in _PRESET_FAMILIES:
+        candidate = f"{family} · {card}"
+        if candidate in names:
+            return candidate
+    return None
+
+
 def builtin_presets() -> list[dict[str, Any]]:
     """仓库 ``start-*.bat`` 的等价档案（值逐字段对照脚本；三张卡四个模型组合）。"""
 
@@ -1077,10 +1151,16 @@ def builtin_presets() -> list[dict[str, Any]]:
 
     qwen = resolve_artifact("qwen3_8_27b_a8.ninfer", roots)
     bonsai = resolve_artifact("bonsai2_27b_vl_mtp_q4q5.ninfer", roots)
+    bonsai25 = resolve_artifact("bonsai25-VL-MTP.ninfer", roots)
     dspine = resolve_artifact("qwen3_8_27b_a8_dspine.ninfer", roots)
     # 容器目录布局（<name>/<name>.ninfer）在 .bat 里是靠目录参数解析的，这里直接指向文件。
     qwen = qwen if qwen.lower().endswith(".ninfer") else str(Path(qwen) / "qwen3_8_27b_a8.ninfer")
     bonsai = bonsai if bonsai.lower().endswith(".ninfer") else str(Path(bonsai) / "bonsai2_27b_vl_mtp_q4q5.ninfer")
+    bonsai25 = (
+        bonsai25
+        if bonsai25.lower().endswith(".ninfer")
+        else str(Path(bonsai25) / "bonsai25-VL-MTP.ninfer")
+    )
     dspine = (
         dspine
         if dspine.lower().endswith(".ninfer")
@@ -1093,6 +1173,9 @@ def builtin_presets() -> list[dict[str, Any]]:
         "host": "127.0.0.1",
         "port": 8080,
         "default_max_tokens": 32768,
+        # 脚本都不传 --log-level（serve 的缺省就是 info）：预设也不该凭空多出一条，
+        # 否则「预设 == 脚本」这条不变式只在这一个字段上失效。
+        "log_level": None,
     }
 
     def profile(name: str, engine: str, artifact: str, **overrides: Any) -> dict[str, Any]:
@@ -1181,6 +1264,29 @@ def builtin_presets() -> list[dict[str, Any]]:
             vision=True,
         ),
     ]
+    for card, engine, card_overrides in (
+        ("4080s", engine_4080s,
+         {"max_context": 262144, "max_concurrency": 3, "prefill_chunk": 1024}),
+        ("4090", engine_4090,
+         {"max_context": 262144, "max_concurrency": 3, "prefill_chunk": 1408}),
+        ("5060Ti", engine_5060ti,
+         {"max_context": 131072, "max_concurrency": 2, "prefill_chunk": 768,
+          "host_kv_mib": 2048}),
+    ):
+        presets.append(
+            profile(
+                f"Bonsai2.5-27B VL · {card}", engine, bonsai25,
+                model_id="bonsai25-27b",
+                default_max_tokens=65536,
+                default_thinking_budget=32768,
+                spec="mtp",
+                draft_tokens=2,
+                lm_head_draft=True,
+                ngram="chain",
+                vision=True,
+                **card_overrides,
+            )
+        )
     if Path(dspine).is_file():
         # DSpine 只换 draft：目标权重与上面的 int8 产物相同（新产物从旧产物导入）。
         presets.append(

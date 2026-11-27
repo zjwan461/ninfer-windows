@@ -17,6 +17,7 @@ import io
 import os
 import socket
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -115,7 +116,11 @@ def _run_bytes(cmd: list[str], timeout: float = 10.0) -> subprocess.CompletedPro
     """捕获原始字节：中文 Windows 的 netstat/tasklist 输出不是 UTF-8，不能走 text 模式。"""
 
     return subprocess.run(
-        cmd, capture_output=True, timeout=timeout, creationflags=CREATE_NO_WINDOW,
+        cmd,
+        capture_output=True,
+        timeout=timeout,
+        # creationflags 只有 Windows 认；别的系统上让它缺省，这些辅助函数才能在开发机上跑。
+        creationflags=CREATE_NO_WINDOW if sys.platform == "win32" else 0,
     )
 
 
@@ -172,6 +177,12 @@ def kill_pid(pid: int) -> tuple[bool, str]:
 # ------------------------------------------------------------------- GPU
 
 
+def read_gpu() -> dict[str, Any]:
+    """跑一次 nvidia-smi 取显卡读数；供仪表盘与「按卡推荐预设」共用。"""
+
+    return GpuMonitor._read(GpuMonitor())
+
+
 class GpuMonitor:
     """每 2 秒跑一次 nvidia-smi，给仪表盘提供显存读数。"""
 
@@ -212,19 +223,26 @@ class GpuMonitor:
         parts = [part.strip() for part in text.splitlines()[0].split(",")] if text else []
         if len(parts) < 6:
             return {"ok": False, "error": "nvidia-smi 输出无法解析", "ts": time.time()}
-        try:
-            return {
-                "ok": True,
-                "name": parts[0],
-                "total_mib": float(parts[1]),
-                "used_mib": float(parts[2]),
-                "free_mib": float(parts[3]),
-                "util_percent": float(parts[4]) if parts[4] not in ("", "[N/A]") else None,
-                "temp_c": float(parts[5]) if parts[5] not in ("", "[N/A]") else None,
-                "ts": time.time(),
-            }
-        except ValueError:
-            return {"ok": False, "error": "nvidia-smi 数值无法解析", "ts": time.time()}
+        def number(index: int) -> float | None:
+            # MIG 切片与受限制的容器里显存字段会返回 [Insufficient Permissions]：型号仍然可用，
+            # 「按卡推荐预设」只靠型号就够了，所以缺数字不算整体失败。
+            try:
+                return float(parts[index])
+            except (IndexError, ValueError):
+                return None
+
+        total = number(1)
+        return {
+            "ok": total is not None,
+            "name": parts[0],
+            "total_mib": total,
+            "used_mib": number(2),
+            "free_mib": number(3),
+            "util_percent": number(4),
+            "temp_c": number(5),
+            "ts": time.time(),
+            **({} if total is not None else {"error": "显存读数不可用"}),
+        }
 
     async def run(self) -> None:
         while True:

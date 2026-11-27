@@ -7,207 +7,232 @@
 <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
-<header class="topbar">
+<aside class="sidebar">
   <div class="brand">
     <span class="logo">N</span>
-    <span class="name">NInfer Launcher</span>
+    <span class="brand-text">
+      <span class="name">NInfer</span>
+      <span class="sub">Launcher</span>
+    </span>
     <span class="ver" id="version"></span>
   </div>
-  <div class="status">
+
+  <nav class="nav" id="tabs">
+    <button class="tab-btn active" data-tab="overview">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13h6V4H4zM14 20h6v-9h-6zM4 20h6v-4H4zM14 8h6V4h-6z"/></svg>
+      <span class="nav-label">总览</span>
+    </button>
+    <button class="tab-btn" data-tab="config">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h8M16 7h4M4 12h12M20 12h0M4 17h4M12 17h8"/><circle cx="14" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg>
+      <span class="nav-label">配置</span>
+    </button>
+    <button class="tab-btn" data-tab="download">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v10M8 10l4 4 4-4M5 19h14"/></svg>
+      <span class="nav-label">下载</span>
+    </button>
+    <button class="tab-btn" data-tab="logs">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14v14H5zM8 9h8M8 12h8M8 15h5"/></svg>
+      <span class="nav-label">日志</span>
+    </button>
+    <button class="tab-btn" data-tab="test">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l2-5 3 10 2-5h7"/></svg>
+      <span class="nav-label">测试</span>
+    </button>
+  </nav>
+
+  <div class="sidebar-foot">
     <span id="status-pill" class="pill pill-idle">读取中…</span>
-    <span id="status-detail" class="muted"></span>
+    <span id="status-detail" class="muted small truncate"></span>
   </div>
-  <div class="actions">
-    <button id="btn-start" class="btn btn-primary">启动</button>
-    <button id="btn-stop" class="btn">停止</button>
-    <button id="btn-kill-external" class="btn btn-danger" hidden>终止占用进程</button>
-  </div>
-</header>
+</aside>
 
-<nav class="tabs" id="tabs">
-  <button class="tab-btn active" data-tab="overview">总览</button>
-  <button class="tab-btn" data-tab="config">配置</button>
-  <button class="tab-btn" data-tab="download">下载</button>
-  <button class="tab-btn" data-tab="logs">日志</button>
-  <button class="tab-btn" data-tab="test">测试</button>
-</nav>
-
-<main>
-  <!-- ================================================================ 总览 -->
-  <section id="tab-overview" class="tab active">
-    <div class="grid grid-4">
-      <article class="card">
-        <h3>状态</h3>
-        <div class="metric" id="ov-state">—</div>
-        <div class="sub" id="ov-uptime">—</div>
-      </article>
-      <article class="card">
-        <h3>模型</h3>
-        <div class="metric small" id="ov-model">—</div>
-        <div class="sub mono" id="ov-artifact">—</div>
-      </article>
-      <article class="card">
-        <h3>显存</h3>
-        <div class="metric" id="ov-vram">—</div>
-        <div class="bar"><div class="bar-fill" id="ov-vram-bar" style="width:0%"></div></div>
-        <div class="sub" id="ov-vram-sub">—</div>
-      </article>
-      <article class="card">
-        <h3>服务</h3>
-        <div class="links" id="ov-links">
-          <a href="#" target="_blank" rel="noopener" data-link="base">/v1</a>
-          <a href="#" target="_blank" rel="noopener" data-link="monitor">/monitor</a>
-          <a href="#" target="_blank" rel="noopener" data-link="metrics">/metrics</a>
-          <a href="#" target="_blank" rel="noopener" data-link="health">/health</a>
-        </div>
-        <div class="sub mono" id="ov-endpoint">—</div>
-      </article>
+<div class="shell">
+  <header class="topbar">
+    <h1 class="page-title" id="page-title">总览</h1>
+    <div class="actions">
+      <button id="btn-start" class="btn btn-primary">启动</button>
+      <button id="btn-stop" class="btn">停止</button>
+      <button id="btn-kill-external" class="btn btn-danger" hidden>终止占用进程</button>
     </div>
+  </header>
 
-    <article class="card">
-      <h3>运行指标 <span class="muted small" id="ov-monitor-stamp"></span></h3>
-      <div class="grid grid-4 tight">
-        <div><div class="k">prefill</div><div class="v" id="ov-prefill">—</div></div>
-        <div><div class="k">decode</div><div class="v" id="ov-decode">—</div></div>
-        <div><div class="k">KV 页占用</div><div class="v" id="ov-kv">—</div></div>
-        <div><div class="k">调度 in-flight</div><div class="v" id="ov-sched">—</div></div>
-        <div><div class="k">累计请求</div><div class="v" id="ov-requests">—</div></div>
-        <div><div class="k">前缀缓存命中</div><div class="v" id="ov-cache">—</div></div>
-        <div><div class="k">草稿接受率</div><div class="v" id="ov-draft">—</div></div>
-        <div><div class="k">上下文上限</div><div class="v" id="ov-ctx">—</div></div>
+  <main>
+    <!-- ================================================================ 总览 -->
+    <section id="tab-overview" class="tab active">
+      <div class="grid grid-4">
+        <article class="card">
+          <h3>状态</h3>
+          <div class="metric" id="ov-state">—</div>
+          <div class="sub" id="ov-uptime">—</div>
+        </article>
+        <article class="card">
+          <h3>模型</h3>
+          <div class="metric small" id="ov-model">—</div>
+          <div class="sub mono" id="ov-artifact">—</div>
+        </article>
+        <article class="card">
+          <h3>显存</h3>
+          <div class="metric" id="ov-vram">—</div>
+          <div class="bar"><div class="bar-fill" id="ov-vram-bar" style="width:0%"></div></div>
+          <div class="sub" id="ov-vram-sub">—</div>
+        </article>
+        <article class="card">
+          <h3>服务</h3>
+          <div class="links" id="ov-links">
+            <a href="#" target="_blank" rel="noopener" data-link="base">/v1</a>
+            <a href="#" target="_blank" rel="noopener" data-link="monitor">/monitor</a>
+            <a href="#" target="_blank" rel="noopener" data-link="metrics">/metrics</a>
+            <a href="#" target="_blank" rel="noopener" data-link="health">/health</a>
+          </div>
+          <div class="sub mono" id="ov-endpoint">—</div>
+        </article>
       </div>
-      <details class="spoiler">
-        <summary>槽位与最近请求</summary>
-        <div id="ov-slots"></div>
-        <div id="ov-recent"></div>
-      </details>
-    </article>
 
-    <article class="card">
-      <h3>当前命令行 <button class="btn btn-mini" id="btn-copy-cmd">复制</button></h3>
-      <pre class="code" id="ov-cmd">（尚未启动）</pre>
-    </article>
-
-    <article class="card">
-      <h3>最近日志 <a href="#" class="muted small" data-goto="logs">查看全部 →</a></h3>
-      <pre class="code log-mini" id="ov-log"></pre>
-    </article>
-  </section>
-
-  <!-- ================================================================ 配置 -->
-  <section id="tab-config" class="tab">
-    <article class="card">
-      <div class="profile-bar">
-        <label class="inline">档案</label>
-        <select id="profile-select" class="select"></select>
-        <button class="btn btn-mini" id="btn-profile-load">载入</button>
-        <button class="btn btn-mini" id="btn-profile-save">另存为…</button>
-        <button class="btn btn-mini" id="btn-profile-delete">删除</button>
-        <button class="btn btn-mini" id="btn-profile-bat">导出 .bat</button>
-        <button class="btn btn-mini" id="btn-profile-presets">恢复内置预设</button>
-        <span class="muted small" id="profile-status"></span>
-      </div>
-    </article>
-
-    <div id="form"></div>
-
-    <article class="card">
-      <h3>自定义参数 <button class="btn btn-mini" id="btn-custom-add">+ 新增参数</button></h3>
-      <div class="muted small">按 <span class="mono">--flag [value]</span> 原样追加到命令行末尾（排在表单参数之后、额外参数之前）。
-        未知的 flag 会让 serve 启动时报错，删掉即可。用于 UI 还没收录的新开关。</div>
-      <div id="custom-args"></div>
-    </article>
-
-    <article class="card">
-      <h3>校验</h3>
-      <div id="validation" class="validation"><div class="muted">—</div></div>
-      <details class="spoiler" open>
-        <summary>命令行预览</summary>
-        <pre class="code" id="cmdline">—</pre>
-      </details>
-      <div class="form-actions">
-        <button class="btn btn-primary" id="btn-start-2">启动 serve</button>
-        <button class="btn" id="btn-stop-2">停止 serve</button>
-        <span class="muted small" id="dirty-hint"></span>
-      </div>
-    </article>
-  </section>
-
-  <!-- ================================================================ 日志 -->
-  <section id="tab-logs" class="tab">
-    <article class="card log-card">
-      <div class="log-bar">
-        <input id="log-filter" class="input" type="search" placeholder="过滤关键字…">
-        <label class="inline"><input type="checkbox" id="log-autoscroll" checked> 自动滚动</label>
-        <label class="inline"><input type="checkbox" id="log-pause"> 暂停</label>
-        <button class="btn btn-mini" id="btn-log-clear">清空</button>
-        <button class="btn btn-mini" id="btn-log-download">下载</button>
-        <span class="muted small" id="log-count"></span>
-      </div>
-      <pre class="code log-full" id="log-view"></pre>
-    </article>
-  </section>
-
-  <!-- ================================================================ 下载 -->
-  <section id="tab-download" class="tab">
-    <article class="card">
-      <h3>下载模型</h3>
-      <div class="dl-form">
-        <div class="row">
-          <label class="inline">模型</label>
-          <select id="dl-preset" class="select grow"></select>
+      <article class="card">
+        <h3>运行指标 <span class="muted small" id="ov-monitor-stamp"></span></h3>
+        <div class="grid grid-4 tight">
+          <div><div class="k">prefill</div><div class="v" id="ov-prefill">—</div></div>
+          <div><div class="k">decode</div><div class="v" id="ov-decode">—</div></div>
+          <div><div class="k">KV 页占用</div><div class="v" id="ov-kv">—</div></div>
+          <div><div class="k">调度 in-flight</div><div class="v" id="ov-sched">—</div></div>
+          <div><div class="k">累计请求</div><div class="v" id="ov-requests">—</div></div>
+          <div><div class="k">前缀缓存命中</div><div class="v" id="ov-cache">—</div></div>
+          <div><div class="k">草稿接受率</div><div class="v" id="ov-draft">—</div></div>
+          <div><div class="k">上下文上限</div><div class="v" id="ov-ctx">—</div></div>
         </div>
-        <div class="row" id="dl-custom" hidden>
-          <label class="inline">仓库 <input id="dl-repo" class="input mono" placeholder="owner/name"></label>
-          <label class="inline">文件 <input id="dl-file" class="input mono" placeholder="model.ninfer"></label>
-        </div>
-        <div class="row">
-          <label class="inline">保存到 <select id="dl-root" class="select"></select></label>
-          <label class="inline">镜像 <select id="dl-endpoint" class="select"></select></label>
-          <input id="dl-endpoint-custom" class="input mono" hidden placeholder="https://your-mirror.example">
-        </div>
-        <div class="row">
-          <label class="inline">代理 <input id="dl-proxy" class="input mono" size="34" placeholder="http://127.0.0.1:7897（留空=直连）"></label>
-          <label class="inline"><input type="checkbox" id="dl-proxy-enable"> 使用代理</label>
-          <button class="btn btn-primary" id="btn-dl-start">开始下载</button>
-        </div>
-        <div class="muted small" id="dl-note"></div>
-        <div class="muted small">代理留空时直连；如果启动器进程本身带着 <span class="mono">HTTPS_PROXY</span> 环境变量，会自动沿用。</div>
-      </div>
-    </article>
-    <article class="card">
-      <h3>下载任务</h3>
-      <div id="dl-jobs"><div class="muted">暂无任务</div></div>
-    </article>
-  </section>
+        <details class="spoiler">
+          <summary>槽位与最近请求</summary>
+          <div id="ov-slots"></div>
+          <div id="ov-recent"></div>
+        </details>
+      </article>
 
-  <!-- ================================================================ 测试 -->
-  <section id="tab-test" class="tab">
-    <article class="card">
-      <h3>发送一次聊天请求</h3>
-      <div class="test-form">
-        <label class="inline">提示词</label>
-        <textarea id="test-prompt" class="input" rows="3" placeholder="用一句话解释前缀缓存。"></textarea>
-        <div class="row">
-          <label class="inline">max_tokens <input id="test-max-tokens" class="input num" type="number" value="256" min="1"></label>
-          <label class="inline">temperature <input id="test-temperature" class="input num" type="number" value="0.7" step="0.05" min="0"></label>
-          <button class="btn btn-primary" id="btn-test-send">发送</button>
-          <span class="muted small" id="test-status"></span>
+      <article class="card">
+        <h3>当前命令行 <button class="btn btn-mini" id="btn-copy-cmd">复制</button></h3>
+        <pre class="code" id="ov-cmd">（尚未启动）</pre>
+      </article>
+
+      <article class="card">
+        <h3>最近日志 <a href="#" class="muted small" data-goto="logs">查看全部 →</a></h3>
+        <pre class="code log-mini" id="ov-log"></pre>
+      </article>
+    </section>
+
+    <!-- ================================================================ 配置 -->
+    <section id="tab-config" class="tab">
+      <article class="card">
+        <div class="profile-bar">
+          <label class="inline">档案</label>
+          <select id="profile-select" class="select"></select>
+          <button class="btn btn-mini" id="btn-profile-load">载入</button>
+          <button class="btn btn-mini" id="btn-profile-save">另存为…</button>
+          <button class="btn btn-mini" id="btn-profile-delete">删除</button>
+          <button class="btn btn-mini" id="btn-profile-bat">导出 .bat</button>
+          <button class="btn btn-mini" id="btn-profile-presets">恢复内置预设</button>
+          <span class="muted small" id="profile-status"></span>
         </div>
-      </div>
-    </article>
-    <article class="card">
-      <h3>回答</h3>
-      <pre class="code answer" id="test-answer">—</pre>
-      <div class="grid grid-4 tight" id="test-timings">
-        <div><div class="k">prefill</div><div class="v" id="tt-prefill">—</div></div>
-        <div><div class="k">decode</div><div class="v" id="tt-decode">—</div></div>
-        <div><div class="k">缓存复用</div><div class="v" id="tt-cache">—</div></div>
-        <div><div class="k">草稿接受</div><div class="v" id="tt-draft">—</div></div>
-      </div>
-    </article>
-  </section>
-</main>
+      </article>
+
+      <div id="form"></div>
+
+      <article class="card">
+        <h3>自定义参数 <button class="btn btn-mini" id="btn-custom-add">+ 新增参数</button></h3>
+        <div class="muted small">按 <span class="mono">--flag [value]</span> 原样追加到命令行末尾（排在表单参数之后、额外参数之前）。
+          未知的 flag 会让 serve 启动时报错，删掉即可。用于 UI 还没收录的新开关。</div>
+        <div id="custom-args"></div>
+      </article>
+
+      <article class="card">
+        <h3>校验</h3>
+        <div id="validation" class="validation"><div class="muted">—</div></div>
+        <details class="spoiler" open>
+          <summary>命令行预览</summary>
+          <pre class="code" id="cmdline">—</pre>
+        </details>
+        <div class="form-actions">
+          <button class="btn btn-primary" id="btn-start-2">启动 serve</button>
+          <button class="btn" id="btn-stop-2">停止 serve</button>
+          <span class="muted small" id="dirty-hint"></span>
+        </div>
+      </article>
+    </section>
+
+    <!-- ================================================================ 日志 -->
+    <section id="tab-logs" class="tab">
+      <article class="card log-card">
+        <div class="log-bar">
+          <input id="log-filter" class="input" type="search" placeholder="过滤关键字…">
+          <label class="inline"><input type="checkbox" id="log-autoscroll" checked> 自动滚动</label>
+          <label class="inline"><input type="checkbox" id="log-pause"> 暂停</label>
+          <button class="btn btn-mini" id="btn-log-clear">清空</button>
+          <button class="btn btn-mini" id="btn-log-download">下载</button>
+          <span class="muted small" id="log-count"></span>
+        </div>
+        <pre class="code log-full" id="log-view"></pre>
+      </article>
+    </section>
+
+    <!-- ================================================================ 下载 -->
+    <section id="tab-download" class="tab">
+      <article class="card">
+        <h3>下载模型</h3>
+        <div class="dl-form">
+          <div class="row">
+            <label class="inline">模型</label>
+            <select id="dl-preset" class="select grow"></select>
+          </div>
+          <div class="row" id="dl-custom" hidden>
+            <label class="inline">仓库 <input id="dl-repo" class="input mono" placeholder="owner/name"></label>
+            <label class="inline">文件 <input id="dl-file" class="input mono" placeholder="model.ninfer"></label>
+          </div>
+          <div class="row">
+            <label class="inline">保存到 <select id="dl-root" class="select"></select></label>
+            <label class="inline">镜像 <select id="dl-endpoint" class="select"></select></label>
+            <input id="dl-endpoint-custom" class="input mono" hidden placeholder="https://your-mirror.example">
+          </div>
+          <div class="row">
+            <label class="inline">代理 <input id="dl-proxy" class="input mono" size="34" placeholder="http://127.0.0.1:7897（留空=直连）"></label>
+            <label class="inline"><input type="checkbox" id="dl-proxy-enable"> 使用代理</label>
+            <button class="btn btn-primary" id="btn-dl-start">开始下载</button>
+          </div>
+          <div class="muted small" id="dl-note"></div>
+          <div class="muted small">代理留空时直连；如果启动器进程本身带着 <span class="mono">HTTPS_PROXY</span> 环境变量，会自动沿用。</div>
+        </div>
+      </article>
+      <article class="card">
+        <h3>下载任务</h3>
+        <div id="dl-jobs"><div class="muted">暂无任务</div></div>
+      </article>
+    </section>
+
+    <!-- ================================================================ 测试 -->
+    <section id="tab-test" class="tab">
+      <article class="card">
+        <h3>发送一次聊天请求</h3>
+        <div class="test-form">
+          <label class="inline">提示词</label>
+          <textarea id="test-prompt" class="input" rows="3" placeholder="用一句话解释前缀缓存。"></textarea>
+          <div class="row">
+            <label class="inline">max_tokens <input id="test-max-tokens" class="input num" type="number" value="256" min="1"></label>
+            <label class="inline">temperature <input id="test-temperature" class="input num" type="number" value="0.7" step="0.05" min="0"></label>
+            <button class="btn btn-primary" id="btn-test-send">发送</button>
+            <span class="muted small" id="test-status"></span>
+          </div>
+        </div>
+      </article>
+      <article class="card">
+        <h3>回答</h3>
+        <pre class="code answer" id="test-answer">—</pre>
+        <div class="grid grid-4 tight" id="test-timings">
+          <div><div class="k">prefill</div><div class="v" id="tt-prefill">—</div></div>
+          <div><div class="k">decode</div><div class="v" id="tt-decode">—</div></div>
+          <div><div class="k">缓存复用</div><div class="v" id="tt-cache">—</div></div>
+          <div><div class="k">草稿接受</div><div class="v" id="tt-draft">—</div></div>
+        </div>
+      </article>
+    </section>
+  </main>
+</div>
 
 <datalist id="models-list"></datalist>
 <datalist id="auto-list">

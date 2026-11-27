@@ -1294,6 +1294,9 @@
 
   function switchTab(name) {
     for (const button of $$(".tab-btn")) button.classList.toggle("active", button.dataset.tab === name);
+    const active = $$(".tab-btn").find((button) => button.dataset.tab === name);
+    const title = $("#page-title");
+    if (title && active) title.textContent = active.textContent.trim();
     for (const tab of $$(".tab")) tab.classList.toggle("active", tab.id === "tab-" + name);
     if (name === "config") renderPreview();
     if (name === "download") refreshDownloads(true);

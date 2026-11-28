@@ -305,6 +305,9 @@ void ProgramImpl::apply_recall_view(SequenceState& sequence, const void* raw,
         throw;
     }
     text_kv_addresses->release(source);
+    // The kept pages were shared with the source until this release; now that the view owns
+    // them alone it must also own the right to extend the last one.
+    text_kv_addresses->adopt_writer(*destination);
     sequence.kv->text = *destination;
     // The source's pages are free now: give the compacted address back the growth room it had,
     // so the next decode steps can append without re-planning.
@@ -478,17 +481,20 @@ ProgramImpl::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
             const RequestControl& request      = requests[lanes[row]];
             const std::uint32_t frontier       = sequence.execution_frontier;
             ordinary_host_ingress->tokens[row] = sequence.ledger.back();
-            ordinary_host_ingress->cache_positions[row] =
-                checked_i32(frontier, "ordinary batch position");
+            // A recall view makes the cache shorter than the timeline: keys keep the rotation
+            // they were written with, so the query's phase is the cache slot plus the rope delta.
+            const std::uint32_t cache_slot =
+                sequence.rope_delta != 0 ? sequence.text_kv_valid : frontier;
+            ordinary_host_ingress->cache_positions[row] = checked_i32(cache_slot, "ordinary batch position");
             ordinary_host_ingress->rope_positions[row] =
-                checked_i32(frontier, "ordinary batch RoPE position") + sequence.rope_delta;
+                checked_i32(cache_slot, "ordinary batch RoPE position") + sequence.rope_delta;
             ordinary_host_ingress->text_kv_table_rows[row] =
                 text_kv_addresses->bound_row(sequence.kv->text);
             const StateImageSelectors selectors                 = state_selectors(sequence);
             ordinary_host_ingress->state_source_slots[row]      = selectors.source;
             ordinary_host_ingress->state_destination_slots[row] = selectors.destination;
             ordinary_host_ingress->sampling[row]                = request.sampling_host;
-            ensure_sequence_kv_mapped(sequence, frontier + 1, 0);
+            ensure_sequence_kv_mapped(sequence, cache_slot + 1, 0);
         }
 
         execution::OrdinaryBatchContext schedule_state{
@@ -521,7 +527,8 @@ ProgramImpl::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
             const std::uint32_t base_S = sequence.ledger_frontier;
             const TokenId token        = ordinary_host_egress->sampled_tokens[row];
             validate_licensed_tokens(std::span<const TokenId>(&token, 1));
-            sequence.text_kv_valid = base_E + 1;
+            sequence.text_kv_valid =
+                sequence.rope_delta != 0 ? sequence.text_kv_valid + 1 : base_E + 1;
             commit_sequence_kv(sequence, sequence.text_kv_valid, 0);
             sequence.tail_hidden_valid = true;
             sequence.ledger.push_back(token);

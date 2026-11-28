@@ -1017,6 +1017,22 @@ public:
         publish_membership(address, stream);
     }
 
+    // A compacted view is published, not activated: every page it keeps is shared with the
+    // address it was forked from, so no page can hold the writer reference until that address is
+    // released. Once it is, the live address must own the pages it kept, or the next commit sees
+    // a page nobody may write ("logical KV committed coverage is not monotonic").
+    void adopt_writer(KVAddressSpaceHandle handle) {
+        Address& address = require_active(handle);
+        for (std::uint32_t page = 0; page < address.page_count; ++page) {
+            const LogicalKVPageHandle logical = membership(address, page);
+            if (pages_->writer_references(logical) == 0 &&
+                pages_->address_references(logical) == 1 && pages_->device_resident(logical)) {
+                pages_->clear_protection(logical);
+                pages_->set_writer(logical, true);
+            }
+        }
+    }
+
     void deactivate(KVAddressSpaceHandle handle) {
         Address& address = require_active(handle);
         for (std::uint32_t page = 0; page < address.page_count; ++page) {

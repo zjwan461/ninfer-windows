@@ -1478,9 +1478,16 @@ void ProgramImpl::trim_sequence_kv(SequenceState& sequence, std::uint32_t main_t
     if (backend_tokens != 0 && !sequence.kv->backend) {
         throw std::logic_error("backend KV trim requested without an allocation");
     }
-    text_kv_addresses->destructive_truncate(sequence.kv->text, main_tokens);
+    // A recall view keeps pages whose original positions are not contiguous, so a timeline
+    // frontier cannot name a cache prefix inside it: the cache can only be kept whole. The
+    // requested frontier is still the ledger's business, which the caller handles separately.
+    const std::uint32_t cache_tokens =
+        sequence.rope_delta != 0 ? std::min(main_tokens, sequence.text_kv_valid) : main_tokens;
+    const std::uint32_t backend_cache_tokens =
+        sequence.rope_delta != 0 ? std::min(backend_tokens, sequence.text_kv_valid) : backend_tokens;
+    text_kv_addresses->destructive_truncate(sequence.kv->text, cache_tokens);
     if (sequence.kv->backend) {
-        backend_kv_addresses->destructive_truncate(*sequence.kv->backend, backend_tokens);
+        backend_kv_addresses->destructive_truncate(*sequence.kv->backend, backend_cache_tokens);
     }
 }
 

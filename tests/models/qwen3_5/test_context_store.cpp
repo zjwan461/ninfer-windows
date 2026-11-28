@@ -479,6 +479,48 @@ void test_kv_store(ninfer::DeviceContext& device) {
                physical_pages.allocated_pages() == 0,
            "shared full-page occupancy survives until its final address reference releases");
 
+    // A compacted view keeps an explicit subset of an address's pages, in caller order, as a new
+    // address. Nothing is copied: a kept page is the same physical page, so the K stored in it keeps
+    // the RoPE phase it was written with, and a dropped page is reclaimed with its source.
+    const auto compact_source = addresses.create_active(4, 0);
+    expect(compact_source.has_value(), "compacted-view source allocation");
+    addresses.ensure_mapped_to_tokens(*compact_source, 256, device.stream);
+    addresses.commit_frontier(*compact_source, 256);
+    const std::array<std::uint32_t, 3> kept_pages{0, 2, 3};
+    const std::array kept{addresses.logical_page(*compact_source, 0),
+                          addresses.logical_page(*compact_source, 2),
+                          addresses.logical_page(*compact_source, 3)};
+    const auto dropped = addresses.logical_page(*compact_source, 1);
+    addresses.deactivate(*compact_source);
+    expect(pages.occupied() == 4, "compacted-view source owns four pages before the view");
+
+    const auto compact_view = addresses.create_inactive();
+    expect(compact_view.has_value(), "compacted-view destination allocation");
+    auto compact_fork =
+        addresses.prepare_compacted_fork(*compact_source, *compact_view, kept_pages, 192, 3, 1);
+    expect(!compact_fork.needs_tail_copy() && compact_fork.compacted() &&
+               compact_fork.ordered_source_pages() == std::vector<std::uint32_t>({0, 2, 3}),
+           "compacted fork keeps whole pages in the caller's order and copies no tail");
+    expect(pages.source_pins(kept[0]) == 1 && pages.source_pins(dropped) == 0,
+           "compacted fork pins exactly the pages it keeps");
+    addresses.commit_prefix_fork(std::move(compact_fork), device.stream);
+    expect(addresses.logical_page(*compact_view, 0) == kept[0] &&
+               addresses.logical_page(*compact_view, 1) == kept[1] &&
+               addresses.logical_page(*compact_view, 2) == kept[2] &&
+               addresses.mapped_pages(*compact_view) == 3 &&
+               addresses.committed_frontier(*compact_view) == 192,
+           "compacted view publishes the selected pages as its whole membership");
+    expect(pages.address_references(kept[0]) == 2 && pages.address_references(dropped) == 1,
+           "compacted view adds a reference to each kept page and none to a dropped page");
+
+    addresses.deactivate(*compact_view);
+    expect(addresses.release(*compact_view) && pages.address_references(kept[0]) == 1 &&
+               pages.address_references(dropped) == 1,
+           "releasing a compacted view returns only the source's own references");
+    expect(addresses.release(*compact_source), "compacted-view source release");
+    expect(pages.occupied() == 0 && physical_pages.allocated_pages() == 0,
+           "the pages a compacted view drops come back to the pool with the source");
+
     const auto mixed_source = addresses.create_active(4, 0);
     expect(mixed_source.has_value(), "mixed snapshot retained-prefix source allocation");
     addresses.ensure_mapped_to_tokens(*mixed_source, 65, device.stream);

@@ -141,7 +141,8 @@ public:
           page_reservation_(std::move(other.page_reservation_)), row_(std::move(other.row_)),
           tail_destination_(other.tail_destination_),
           staged_tail_release_(other.staged_tail_release_),
-          tail_source_settled_(other.tail_source_settled_) {
+          tail_source_settled_(other.tail_source_settled_),
+          ordered_source_pages_(std::move(other.ordered_source_pages_)) {
         other.tail_destination_.reset();
     }
 
@@ -151,6 +152,14 @@ public:
 
     [[nodiscard]] bool needs_tail_copy() const noexcept { return tail_columns_ != 0; }
 
+    // A compacted fork names its source pages explicitly instead of taking the address prefix:
+    // ordered_source_pages()[i] is the source page that lands at destination page i.
+    [[nodiscard]] bool compacted() const noexcept { return !ordered_source_pages_.empty(); }
+
+    [[nodiscard]] const std::vector<std::uint32_t>& ordered_source_pages() const noexcept {
+        return ordered_source_pages_;
+    }
+
 private:
     KVPrefixForkReservation(KVAddressSpaceStore& owner, KVAddressSpaceHandle source,
                             KVAddressSpaceHandle destination, std::uint32_t frontier,
@@ -158,12 +167,14 @@ private:
                             std::uint32_t requested_entitlement,
                             DeviceKVPageReservation&& page_reservation, KVExecutionRowLease&& row,
                             std::optional<LogicalKVPageHandle> tail_destination,
-                            bool staged_tail_release) noexcept
+                            bool staged_tail_release,
+                            std::vector<std::uint32_t> ordered_source_pages = {}) noexcept
         : owner_(&owner), source_(source), destination_(destination), frontier_(frontier),
           full_pages_(full_pages), tail_columns_(tail_columns),
           requested_entitlement_(requested_entitlement),
           page_reservation_(std::move(page_reservation)), row_(std::move(row)),
-          tail_destination_(tail_destination), staged_tail_release_(staged_tail_release) {}
+          tail_destination_(tail_destination), staged_tail_release_(staged_tail_release),
+          ordered_source_pages_(std::move(ordered_source_pages)) {}
 
     KVAddressSpaceStore* owner_ = nullptr;
     KVAddressSpaceHandle source_;
@@ -177,6 +188,7 @@ private:
     std::optional<LogicalKVPageHandle> tail_destination_;
     bool staged_tail_release_ = false;
     bool tail_source_settled_ = false;
+    std::vector<std::uint32_t> ordered_source_pages_;
 
     friend class KVAddressSpaceStore;
 };
@@ -1072,6 +1084,65 @@ public:
                                        staged_tail_release);
     }
 
+    // Publishes a view of the source address that keeps an explicit subset of its pages, in the
+    // caller's order, as the destination's leading pages. The destination covers `frontier` tokens
+    // and every retained page is complete, so no partial tail is copied: the view is made of whole
+    // pages whose physical identity, and therefore whose stored RoPE phase, is unchanged.
+    [[nodiscard]] KVPrefixForkReservation
+    prepare_compacted_fork(KVAddressSpaceHandle source_handle, KVAddressSpaceHandle destination_handle,
+                           std::span<const std::uint32_t> ordered_source_pages,
+                           std::uint32_t frontier, std::uint32_t entitlement,
+                           std::int32_t execution_row) {
+        Address& source      = require(source_handle);
+        Address& destination = require(destination_handle);
+        if (source.active || source.row || source.reservation.valid()) {
+            throw std::logic_error("KV compacted-view source is still active");
+        }
+        if (destination.active || destination.row || destination.reservation.valid() ||
+            destination.page_count != 0 || destination.committed_frontier != 0) {
+            throw std::logic_error("KV compacted-view destination is not empty");
+        }
+        if (ordered_source_pages.empty()) {
+            throw std::invalid_argument("KV compacted view keeps no page");
+        }
+        if (frontier == 0 || pages_for_tokens(frontier) != ordered_source_pages.size()) {
+            throw std::invalid_argument("KV compacted-view frontier does not match its page count");
+        }
+        if (frontier > source.committed_frontier) {
+            throw std::logic_error("KV compacted-view frontier is unavailable");
+        }
+        const std::uint32_t required_pages = pages_for_tokens(frontier);
+        if (entitlement < required_pages || entitlement > page_capacity_) {
+            throw std::invalid_argument("KV compacted-view entitlement is invalid");
+        }
+        const std::uint32_t page_size = static_cast<std::uint32_t>(kPagedKVPageSize);
+        for (std::size_t index = 0; index < ordered_source_pages.size(); ++index) {
+            const std::uint32_t page = ordered_source_pages[index];
+            if (page >= source.page_count || (index != 0 && page <= ordered_source_pages[index - 1])) {
+                throw std::invalid_argument("KV compacted-view page order is not strictly increasing");
+            }
+            const LogicalKVPageHandle logical = membership(source, page);
+            if (!pages_->device_resident(logical) ||
+                pages_->committed_columns(logical) < page_size ||
+                !pages_->can_pin_source(logical) || !pages_->can_retain_reference(logical, false)) {
+                throw std::logic_error("KV compacted-view source page is not stable");
+            }
+        }
+
+        DeviceKVPageReservation reservation = pages_->physical_pool().make_empty_reservation();
+        pages_->physical_pool().resize_reservation(reservation, entitlement - required_pages);
+        KVExecutionRowLease row = tables_->acquire(execution_row);
+        for (const std::uint32_t page : ordered_source_pages) {
+            pages_->pin_source(membership(source, page));
+        }
+        std::vector<std::uint32_t> compact_pages(ordered_source_pages.begin(),
+                                                 ordered_source_pages.end());
+        return KVPrefixForkReservation(*this, source_handle, destination_handle, frontier,
+                                       required_pages, 0, entitlement, std::move(reservation),
+                                       std::move(row), std::nullopt, false,
+                                       std::move(compact_pages));
+    }
+
     [[nodiscard]] DeviceKVPageHandle
     prefix_fork_tail_source(const KVPrefixForkReservation& fork) const {
         require_prefix_fork(fork);
@@ -1144,7 +1215,7 @@ public:
             throw std::logic_error("KV prefix-fork destination changed before publication");
         }
         for (std::uint32_t page = 0; page < required_pages; ++page) {
-            const LogicalKVPageHandle logical = membership(source, page);
+            const LogicalKVPageHandle logical = fork_source_page(fork, source, page);
             const bool settled_tail = page == fork.full_pages_ && fork.tail_source_settled_;
             if ((!settled_tail &&
                  (pages_->source_pins(logical) == 0 || !pages_->device_resident(logical))) ||
@@ -1161,7 +1232,7 @@ public:
 
         publish_scratch_.clear();
         for (std::uint32_t page = 0; page < fork.full_pages_; ++page) {
-            publish_scratch_.push_back(pages_->physical(membership(source, page)));
+            publish_scratch_.push_back(pages_->physical(fork_source_page(fork, source, page)));
         }
         if (fork.tail_destination_) {
             publish_scratch_.push_back(pages_->physical(*fork.tail_destination_));
@@ -1169,7 +1240,7 @@ public:
         tables_->publish(fork.row_->handle(), 0, publish_scratch_, stream);
 
         for (std::uint32_t page = 0; page < fork.full_pages_; ++page) {
-            const LogicalKVPageHandle logical = membership(source, page);
+            const LogicalKVPageHandle logical = fork_source_page(fork, source, page);
             pages_->retain_reference(logical, false);
             pages_->protect_coverage(logical, static_cast<std::uint32_t>(kPagedKVPageSize));
             membership(destination, page) = logical;
@@ -1190,7 +1261,7 @@ public:
         }
         for (std::uint32_t page = 0; page < required_pages; ++page) {
             if (page == fork.full_pages_ && fork.tail_source_settled_) { continue; }
-            pages_->unpin_source(membership(source, page));
+            pages_->unpin_source(fork_source_page(fork, source, page));
         }
         fork.owner_ = nullptr;
     }
@@ -1202,7 +1273,7 @@ public:
             const std::uint32_t required_pages = pages_for_tokens(fork.frontier_);
             for (std::uint32_t page = 0; page < required_pages; ++page) {
                 if (page == fork.full_pages_ && fork.tail_source_settled_) { continue; }
-                const LogicalKVPageHandle logical = membership(source, page);
+                const LogicalKVPageHandle logical = fork_source_page(fork, source, page);
                 if (pages_->valid(logical) && pages_->source_pins(logical) != 0) {
                     pages_->unpin_source(logical);
                 }
@@ -1803,6 +1874,15 @@ private:
         if (fork.owner_ != this || !valid(fork.source_) || !valid(fork.destination_)) {
             throw std::logic_error("KV prefix-fork reservation is stale");
         }
+    }
+
+    // A compacted reservation names the source page behind each destination page explicitly; a
+    // prefix-shaped one walks the source membership from zero.
+    [[nodiscard]] const LogicalKVPageHandle&
+    fork_source_page(const KVPrefixForkReservation& fork, const Address& source,
+                     std::uint32_t page) const {
+        if (fork.ordered_source_pages_.empty()) { return membership(source, page); }
+        return membership(source, fork.ordered_source_pages_[page]);
     }
 
     void require_active_snapshot(const KVActiveSnapshotReservation& snapshot) const {

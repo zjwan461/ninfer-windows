@@ -31,6 +31,10 @@ ninfer_add_test(ninfer_gdn_replay_records_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_gdn_replay_records.cpp"
   LIBRARIES ninfer_core)
 
+ninfer_add_test(ninfer_kv_workspace_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_kv_workspace.cpp"
+  LIBRARIES ninfer_core)
+
 ninfer_add_test(ninfer_slot_spill_guard_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_slot_spill_guard.cpp"
   LIBRARIES ninfer_core)

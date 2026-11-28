@@ -102,6 +102,8 @@ WorkspacePlan plan_workspace(const WorkspaceBudget&, span<const KvBlock> residen
 - 先实现"只选 top-k、不做图传播"的最小版本，用验收数据决定是否要传播（参考实现用 alpha=0.2 的一跳传播，收益未在本卡验证）。
 - 接入点：请求边界（prefill 之后、decode 之前），与 FIFO/无抢占兼容；不改 `Engine` 的并发语义。
 
+**已落地（策略半边）**：`src/core/kv_workspace.h` 的 `select_kv_blocks(scores, page_count, {block_pages, sink_pages, recent_pages, budget_pages})`。先锁定覆盖 sink 前缀与 recent 尾的块（它们的真实页数计入预算），再按分数降序装填剩余块，同分取较小 id；只在整块页数放得下时装入，短尾块按自身页数计费；mandatory 已超预算或一块都放不下时抛 `std::runtime_error`，不静默缩小请求。测试覆盖预算三档、同分、短尾块计费与四类非法几何。
+
 ## 4. 实施顺序与工作量
 
 | 顺序 | 工作 | 估时 | 结束时能验证什么 |

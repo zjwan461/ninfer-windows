@@ -243,6 +243,10 @@ checkpoint 覆盖一起改，属于会改变产品行为的集成，应当单独
  4. **位置记账**：`KvRecallDecision.boundary` 写回序列（`rope_delta`、执行前沿、提交前沿）。decode 已经按行读两个位置，
     所以这里不需要改 kernel。**注意顺序**：先提交新地址，再改 `sequence.rope_delta`/`text_kv_valid`，否则中间一步的
     位置与地址不一致。
+    这一步的纯函数已经落地：`core::plan_sequence_view(committed_tokens, boundary)`（`a532cfc2`）把边界换成三个数，
+    并守住"视图只缩短 cache、不移动时间线"这条不变量——`execution_frontier + rope_delta == 原位置`，否则抛
+    `std::invalid_argument`。多次压实会累加 `rope_delta`，`next_sample_position` 始终等于第一次调用时给出的原位置，
+    测试覆盖了空位置、丢失 delta、视图越界、二次压实四种情况。
  5. **验收**（任一不满足即回退）：≤262,144 时窗口化与全量的 `tools/bench/run_kv_recall_fidelity.py` 逐字节一致；
     30/50/80 万 needle 4/4；预算不足必须判失败（负对照：B=36,864 丢中段针）；关开关时短上下文 bit-identical；
     prefill 不回退、decode 不降超 5%。

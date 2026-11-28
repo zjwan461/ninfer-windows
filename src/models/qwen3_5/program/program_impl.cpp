@@ -116,7 +116,13 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
         if (attention_layers <= 0) {
             throw std::invalid_argument("Qwen3.5 recall capture found no full-attention layers");
         }
-        constexpr std::int32_t block_tokens = 128;
+        std::int32_t block_tokens = 128;
+        if (const char* raw = std::getenv("NINFER_KV_RECALL_BLOCK")) {
+            const long parsed = std::strtol(raw, nullptr, 10);
+            if (parsed >= 64 && parsed <= 512) {
+                block_tokens = static_cast<std::int32_t>(parsed - parsed % 64);
+            }
+        }
         const auto block_capacity = static_cast<std::int32_t>(std::max<std::uint32_t>(
             1U, capacity / static_cast<std::uint32_t>(block_tokens)));
         recall_cursor = std::make_unique<KvRecallCursor>(

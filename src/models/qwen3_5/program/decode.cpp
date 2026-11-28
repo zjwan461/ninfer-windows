@@ -264,6 +264,39 @@ void ProgramImpl::report_recall_boundary(SequenceState& sequence) {
                 std::fprintf(stderr, " %d", id);
             }
             std::fprintf(stderr, "\n");
+            if (const char* probe = std::getenv("NINFER_KV_RECALL_TRACE_BLOCKS")) {
+                const std::string list(probe);
+                std::size_t at = 0;
+                while (at < list.size()) {
+                    const std::size_t comma = list.find(',', at);
+                    const std::string piece =
+                        list.substr(at, comma == std::string::npos ? std::string::npos : comma - at);
+                    at = comma == std::string::npos ? list.size() : comma + 1;
+                    if (piece.empty()) { continue; }
+                    const std::int32_t block = static_cast<std::int32_t>(std::stol(piece));
+                    if (block < 0 || static_cast<std::size_t>(block) >= scores.size()) {
+                        std::fprintf(stderr, "kv recall: block %d: no score\n", block);
+                        continue;
+                    }
+                    const float mine = scores[static_cast<std::size_t>(block)];
+                    std::size_t rank = 0;
+                    for (std::size_t other = 0; other < scores.size(); ++other) {
+                        if (scores[other] > mine ||
+                            (scores[other] == mine &&
+                             static_cast<std::int32_t>(other) < block)) {
+                            ++rank;
+                        }
+                    }
+                    const bool kept =
+                        std::find(decision.selected_blocks.begin(),
+                                  decision.selected_blocks.end(),
+                                  block) != decision.selected_blocks.end();
+                    std::fprintf(stderr,
+                                 "kv recall: block %d score %.6f rank %zu of %zu kept %d\n",
+                                 block, static_cast<double>(mine), rank, scores.size(),
+                                 kept ? 1 : 0);
+                }
+            }
         }
         // What the swap would do to the sequence: the cache shrinks, the timeline does not.
         const core::SequenceViewUpdate update =

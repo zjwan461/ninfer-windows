@@ -136,14 +136,22 @@ void KvRecallCursor::capture_query(std::int32_t layer, const Tensor& pre_rope_qu
     CUDA_CHECK(cudaStreamSynchronize(stream));
 
     const auto* values = reinterpret_cast<const __nv_bfloat16*>(host.data());
+    // The question sits at the end of the prompt, so the query pool covers only its last columns:
+    // averaging a whole 512-column tail mixes the ask into the haystack it is asking about.
+    std::int32_t asked = pooled;
+    if (const char* raw = std::getenv("NINFER_KV_RECALL_QUERY_TOKENS")) {
+        const long parsed = std::strtol(raw, nullptr, 10);
+        if (parsed > 0 && parsed < pooled) { asked = static_cast<std::int32_t>(parsed); }
+    }
+    const std::int32_t first_asked = pooled - asked;
     float* out         = queries_.data() + static_cast<std::size_t>(layer) * head_dim_ * kv_heads_;
-    const float inverse = 1.0F / static_cast<float>(group * pooled);
+    const float inverse = 1.0F / static_cast<float>(group * asked);
     for (std::int32_t kv = 0; kv < kv_heads_; ++kv) {
         for (std::int32_t d = 0; d < head_dim_; ++d) {
             float sum = 0.0F;
             for (std::int32_t r = 0; r < group; ++r) {
                 const std::int32_t head = kv * group + r;
-                for (std::int32_t c = 0; c < pooled; ++c) {
+                for (std::int32_t c = first_asked; c < pooled; ++c) {
                     // The copied block is one contiguous run of [head_dim, query_heads] per column,
                     // so a column's head sits at (c * query_heads + head) * head_dim + d.
                     sum += __bfloat162float(

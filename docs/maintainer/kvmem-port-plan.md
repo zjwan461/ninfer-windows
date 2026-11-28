@@ -196,3 +196,14 @@ ordinary_host_ingress->rope_positions[row]  = checked_i32(frontier, ...) + seque
 - 不引入 re-RoPE 路径：本仓库的 RoPE 位置与 cache 位置本来就是两个张量，压实视图只需要正确的相位与正确的范围，不需要重算 K。
 - 不新增注意力 kernel：`causal_softmax_attention` 的 `positions` 只承担读取范围，相位由 `text_rope` 独立负责。
 - 不在召回层做学习式策略；先用与参考一致的静态打分，把变量留给预算。
+## 9. 下一步（接线，按此顺序执行）
+
+前八个模块都已落地并有测试；剩下的是把已经存在的东西接到主线上，顺序不能反：
+
+1. **捕获**（src/models/qwen3_5/execution/text.cpp:882）：在"	ext_rope 之前"拿到 pre-RoPE 的 kn（[head_dim, kv_head_count, T]），按段调用 ops::kv_block_accumulate（整段历史共用一份 sums/counts，只要求装得下）或 CPU 侧 core::KvRecallIndex::capture。只在启用开关时捕获，默认路径零开销。
+2. **边界打分**（src/models/qwen3_5/program/prefill.cpp:646，publish_continuation 闸口）：kv_block_finalize → kv_block_scores（查询取最后一条 user 消息，GQA 分组平均的约定见 3.4）→ core::select_kv_blocks。
+3. **组装**：core::build_kv_view 得到页序 → KVStore::prepare_compacted_fork / commit_prefix_fork 发布（已落地，c75d9d48）。
+4. **位置记账**：core::plan_view_boundary 的返回值写回序列（ope_delta、执行前沿、提交前沿）。
+5. **验收**（任一不满足即回退）：≤262,144 时窗口化与全量的 	ools/bench/run_kv_recall_fidelity.py 逐字节一致；30/50/80 万 needle 4/4；预算不足必须判失败（负对照：B=36,864 丢中段针）；关开关时短上下文 bit-identical；prefill 不回退、decode 不降超 5%。
+
+第 1 步是唯一会碰热路径的改动，建议单独提交、单独验收，并先跑一遍不带开关的全量基线留档。

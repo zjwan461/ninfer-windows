@@ -226,6 +226,73 @@ int query_case() {
     return failures;
 }
 
+int block_scores_case() {
+    int failures = 0;
+    constexpr int kHeadDim = 2;
+    constexpr int kKvHeads = 1;
+    constexpr int kQueryHeads = 2;
+    constexpr int kBlock = 2;
+    constexpr int kCapacity = 3;
+    constexpr int kColumns = 6;
+
+    KvRecallCursor cursor(1, kHeadDim, kKvHeads, kBlock, kCapacity);
+    // The query pools to (1, 0) because both query heads carry the same direction.
+    std::vector<__nv_bfloat16> query_host(static_cast<std::size_t>(kHeadDim) * kQueryHeads * 2);
+    for (int c = 0; c < 2; ++c) {
+        for (int h = 0; h < kQueryHeads; ++h) {
+            query_host[static_cast<std::size_t>(h) * kHeadDim + 0] = __float2bfloat16(3.0F);
+            query_host[static_cast<std::size_t>(h) * kHeadDim + 1] = __float2bfloat16(0.0F);
+        }
+    }
+    void* query_device = nullptr;
+    cudaMalloc(&query_device, query_host.size() * sizeof(__nv_bfloat16));
+    cudaMemcpy(query_device, query_host.data(), query_host.size() * sizeof(__nv_bfloat16),
+               cudaMemcpyHostToDevice);
+    cursor.capture_query(0, Tensor(query_device, DType::BF16, {kHeadDim, kQueryHeads, 2}), nullptr);
+
+    // Block 0 points along the second axis, block 1 along the query direction, block 2 against it:
+    // the cosines are exactly 0, 1 and -1.
+    std::vector<__nv_bfloat16> keys_host(static_cast<std::size_t>(kHeadDim) * kKvHeads * kColumns);
+    auto put = [&](int column, int d, float value) {
+        keys_host[static_cast<std::size_t>(d) + static_cast<std::size_t>(kHeadDim) * column] =
+            __float2bfloat16(value);
+    };
+    for (int c = 0; c < 2; ++c) {
+        put(c, 0, 0.0F);
+        put(c, 1, 2.0F);
+    }
+    for (int c = 2; c < 4; ++c) {
+        put(c, 0, 2.0F);
+        put(c, 1, 0.0F);
+    }
+    for (int c = 4; c < 6; ++c) {
+        put(c, 0, -1.0F);
+        put(c, 1, 0.0F);
+    }
+    void* keys_device = nullptr;
+    cudaMalloc(&keys_device, keys_host.size() * sizeof(__nv_bfloat16));
+    cudaMemcpy(keys_device, keys_host.data(), keys_host.size() * sizeof(__nv_bfloat16),
+               cudaMemcpyHostToDevice);
+    cursor.capture_layer(0, Tensor(keys_device, DType::BF16, {kHeadDim, kKvHeads, kColumns}),
+                         nullptr);
+
+    failures += expect_throws([&] { (void)cursor.block_scores(); }, "scores need finish() first");
+    cursor.finish(nullptr);
+    const std::vector<float> scores = cursor.block_scores();
+    failures += expect(scores.size() == 3, "one score per complete block");
+    const float want[3] = {0.0F, 1.0F, -1.0F};
+    for (int block = 0; block < 3; ++block) {
+        if (std::fabs(scores[static_cast<std::size_t>(block)] - want[block]) > 1e-4F) {
+            std::cerr << "FAIL: block " << block << " score " << scores[block] << " want "
+                      << want[block] << '\n';
+            ++failures;
+        }
+    }
+    cudaFree(query_device);
+    cudaFree(keys_device);
+    return failures;
+}
+
 int partial_block_case() {
     int failures = 0;
     constexpr int kHeadDim = 1;
@@ -302,6 +369,7 @@ int main() {
     int failures = 0;
     failures += accumulate_and_read_case();
     failures += query_case();
+    failures += block_scores_case();
     failures += partial_block_case();
     failures += invalid_case();
 

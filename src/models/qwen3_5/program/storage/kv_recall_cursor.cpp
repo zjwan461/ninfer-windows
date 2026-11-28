@@ -6,6 +6,7 @@
 #include "core/device.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cuda_bf16.h>
 #include <stdexcept>
 #include <string>
@@ -164,6 +165,50 @@ const float* KvRecallCursor::query(std::int32_t layer) const {
         throw std::logic_error("kv_recall_cursor: no query was captured for this layer");
     }
     return queries_.data() + static_cast<std::size_t>(layer) * head_dim_ * kv_heads_;
+}
+
+std::vector<float> KvRecallCursor::block_scores() const {
+    if (!finished_) {
+        throw std::logic_error("kv_recall_cursor: block_scores needs finish() first");
+    }
+    for (std::int32_t layer = 0; layer < layers_count_; ++layer) {
+        if (!query_valid_[static_cast<std::size_t>(layer)]) {
+            throw std::logic_error("kv_recall_cursor: a layer is missing its query");
+        }
+    }
+    const std::int32_t blocks = complete_blocks();
+    std::vector<float> scores(static_cast<std::size_t>(blocks), 0.0F);
+    if (blocks == 0) { return scores; }
+    const float inverse = 1.0F / static_cast<float>(layers_count_ * kv_heads_);
+    for (std::int32_t layer = 0; layer < layers_count_; ++layer) {
+        const std::vector<float>& means = block_means_[static_cast<std::size_t>(layer)];
+        const float* q = queries_.data() + static_cast<std::size_t>(layer) * head_dim_ * kv_heads_;
+        for (std::int32_t kv = 0; kv < kv_heads_; ++kv) {
+            const float* qh = q + static_cast<std::size_t>(kv) * head_dim_;
+            double q_norm   = 0.0;
+            for (std::int32_t d = 0; d < head_dim_; ++d) {
+                q_norm += static_cast<double>(qh[d]) * static_cast<double>(qh[d]);
+            }
+            q_norm = std::sqrt(q_norm);
+            for (std::int32_t block = 0; block < blocks; ++block) {
+                const float* mh = means.data() + static_cast<std::size_t>(kv) * head_dim_ +
+                                  static_cast<std::size_t>(head_dim_) * kv_heads_ * block;
+                double dot = 0.0;
+                double m_norm = 0.0;
+                for (std::int32_t d = 0; d < head_dim_; ++d) {
+                    dot += static_cast<double>(qh[d]) * static_cast<double>(mh[d]);
+                    m_norm += static_cast<double>(mh[d]) * static_cast<double>(mh[d]);
+                }
+                m_norm = std::sqrt(m_norm);
+                const double denom = q_norm * m_norm;
+                if (denom > 0.0) {
+                    scores[static_cast<std::size_t>(block)] +=
+                        static_cast<float>(dot / denom) * inverse;
+                }
+            }
+        }
+    }
+    return scores;
 }
 
 void KvRecallCursor::end_of_prefill(cudaStream_t stream) {

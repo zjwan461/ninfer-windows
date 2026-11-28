@@ -51,6 +51,11 @@ public:
     // complete_blocks() entries of the last dimension are meaningful. Valid after finish().
     [[nodiscard]] const std::vector<float>& block_means(std::int32_t layer) const;
 
+    // One score per complete block: the mean over layers and KV heads of the cosine between the
+    // layer's pooled query and the block's mean key. This is the host form of the device
+    // `kv_block_scores` op, used once per request boundary where the cost is irrelevant.
+    [[nodiscard]] std::vector<float> block_scores() const;
+
     [[nodiscard]] std::int32_t layers() const noexcept { return layers_count_; }
     [[nodiscard]] std::int32_t block_tokens() const noexcept { return block_tokens_; }
     [[nodiscard]] std::int32_t block_capacity() const noexcept { return block_capacity_; }

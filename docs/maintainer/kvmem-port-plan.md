@@ -240,7 +240,22 @@ checkpoint 覆盖一起改，属于会改变产品行为的集成，应当单独
 store 测试里加的就是"整页 + 尾页"的组合：源 232 token（最后一页 40 列），保留 `{0,2,3}`、frontier 168，
 断言 `mapped_pages == 3`、`committed_frontier == 168`、尾页物理身份不变、被丢的那页引用归零、释放后池子清空。
 
-**下一步就只剩 `apply_recall_view` 本身**（开关 `NINFER_KV_RECALL_APPLY`）：deactivate 源 →
+## 7.9 换地址前还剩一个口径问题（下一轮从这里开始）
+
+`report_recall_boundary` 现在用 **索引口径**的前沿：`committed = complete_blocks() * block_tokens`，即 128 的整数倍。
+索引只对整块负责（半块的平均值没有意义），但序列真正持有的 token 数是 `sequence.text_kv_valid`，一般不是 128 的倍数，
+两者之间还有 1..127 个 token（它们属于最后一个未完成的块，落在 recent 里，永远被保留）。
+
+`apply_recall_view` 必须用**序列口径**：`pages = pages_for_tokens(sequence.text_kv_valid)`，
+`boundary.visible_tokens` 也以 `text_kv_valid` 为准。因此要先把末尾那个半块的 `KvBlock{id = complete_blocks, tokens = text_kv_valid - committed, pinned = false}`
+追加进 `history`，并给它一个分数——参考实现的做法是不让它参与打分、直接当作 recent 的成员（它总在 recent 里）。
+两种可行写法：
+
+1. 给 `select_kv_blocks` 增加一个"尾部块免于打分"的入参（只在 recent/sink 覆盖时保留），
+2. 或者在 `plan_recall` 内部把尾部块拼进 `selected` 之后再调用 `select_kv_blocks`（选择器已经接受"被选中的块必须存在"，
+   而 `build_kv_view` 本来就支持短尾块）。
+
+写完这两处之后，`apply_recall_view` 本身只是 store 调用序列（§7.8 末尾），不再有语义上的未知。**下一步就只剩 `apply_recall_view` 本身**（开关 `NINFER_KV_RECALL_APPLY`）：deactivate 源 →
 `create_inactive` → `prepare_compacted_fork` → `commit_prefix_fork` → `sequence.kv->text = *destination` →
 `release(source)` → `plan_sequence_view` 写回 `rope_delta` / `text_kv_valid` / `execution_frontier` →
 `recall_cursor->reset()`。失败路径必须把序列留在原地址上（源已 deactivate，异常时重新 activate）。

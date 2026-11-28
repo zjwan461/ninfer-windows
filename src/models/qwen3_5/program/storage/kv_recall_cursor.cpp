@@ -3,6 +3,10 @@
 
 #include "ninfer/ops/kv_block_pool.h"
 
+#include "core/device.h"
+
+#include <algorithm>
+#include <cuda_bf16.h>
 #include <stdexcept>
 #include <string>
 
@@ -33,6 +37,8 @@ KvRecallCursor::KvRecallCursor(std::int32_t layers, std::int32_t head_dim, std::
         block_means_.emplace_back(static_cast<std::size_t>(head_dim) * kv_heads * block_capacity,
                                   0.0F);
     }
+    queries_.assign(static_cast<std::size_t>(layers) * head_dim * kv_heads, 0.0F);
+    query_valid_.assign(static_cast<std::size_t>(layers), false);
 }
 
 KvRecallCursor::~KvRecallCursor() = default;
@@ -101,6 +107,65 @@ void KvRecallCursor::finish(cudaStream_t stream) {
     finished_ = true;
 }
 
+void KvRecallCursor::capture_query(std::int32_t layer, const Tensor& pre_rope_queries,
+                                   cudaStream_t stream) {
+    if (layer < 0 || layer >= layers_count_) {
+        throw std::out_of_range("kv_recall_cursor: layer " + std::to_string(layer) +
+                                " is outside [0," + std::to_string(layers_count_) + ")");
+    }
+    if (pre_rope_queries.dtype != DType::BF16) {
+        throw std::invalid_argument("kv_recall_cursor: queries must be bf16");
+    }
+    if (pre_rope_queries.ne[0] != head_dim_ || pre_rope_queries.ne[2] <= 0) {
+        throw std::invalid_argument("kv_recall_cursor: queries must be [head_dim, heads, columns]");
+    }
+    const std::int32_t query_heads = pre_rope_queries.ne[1];
+    if (query_heads <= 0 || query_heads % kv_heads_ != 0) {
+        throw std::invalid_argument("kv_recall_cursor: query heads must divide into the KV heads");
+    }
+    const std::int32_t group   = query_heads / kv_heads_;
+    const std::int32_t columns = pre_rope_queries.ne[2];
+    const std::int32_t pooled  = std::min(columns, kQueryTokens);
+    const std::size_t row = static_cast<std::size_t>(head_dim_) * query_heads * sizeof(std::uint16_t);
+    std::vector<std::uint16_t> host(static_cast<std::size_t>(head_dim_) * query_heads * pooled);
+    const auto* base = static_cast<const std::uint8_t*>(pre_rope_queries.data) +
+                       static_cast<std::size_t>(columns - pooled) * row;
+    CUDA_CHECK(cudaMemcpy2DAsync(host.data(), row, base, row, row, pooled,
+                                 cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+
+    const auto* values = reinterpret_cast<const __nv_bfloat16*>(host.data());
+    float* out         = queries_.data() + static_cast<std::size_t>(layer) * head_dim_ * kv_heads_;
+    const float inverse = 1.0F / static_cast<float>(group * pooled);
+    for (std::int32_t kv = 0; kv < kv_heads_; ++kv) {
+        for (std::int32_t d = 0; d < head_dim_; ++d) {
+            float sum = 0.0F;
+            for (std::int32_t r = 0; r < group; ++r) {
+                const std::int32_t head = kv * group + r;
+                for (std::int32_t c = 0; c < pooled; ++c) {
+                    // The copied block is one contiguous run of [head_dim, query_heads] per column,
+                    // so a column's head sits at (c * query_heads + head) * head_dim + d.
+                    sum += __bfloat162float(
+                        values[(static_cast<std::size_t>(c) * query_heads + head) * head_dim_ + d]);
+                }
+            }
+            out[static_cast<std::size_t>(kv) * head_dim_ + d] = sum * inverse;
+        }
+    }
+    query_valid_[static_cast<std::size_t>(layer)] = true;
+}
+
+const float* KvRecallCursor::query(std::int32_t layer) const {
+    if (layer < 0 || layer >= layers_count_) {
+        throw std::out_of_range("kv_recall_cursor: layer " + std::to_string(layer) +
+                                " is outside [0," + std::to_string(layers_count_) + ")");
+    }
+    if (!query_valid_[static_cast<std::size_t>(layer)]) {
+        throw std::logic_error("kv_recall_cursor: no query was captured for this layer");
+    }
+    return queries_.data() + static_cast<std::size_t>(layer) * head_dim_ * kv_heads_;
+}
+
 void KvRecallCursor::end_of_prefill(cudaStream_t stream) {
     finish(stream);
     std::fprintf(stderr,
@@ -125,6 +190,8 @@ void KvRecallCursor::reset() {
     for (auto& count : counts_) { count.fill(0); }
     for (auto& mean : means_) { mean.fill(0); }
     for (auto& stored : block_means_) { stored.assign(stored.size(), 0.0F); }
+    std::fill(queries_.begin(), queries_.end(), 0.0F);
+    std::fill(query_valid_.begin(), query_valid_.end(), false);
     captured_columns_ = 0;
     turn_columns_     = 0;
     layers_seen_      = 0;

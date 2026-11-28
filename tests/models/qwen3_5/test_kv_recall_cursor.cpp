@@ -135,6 +135,97 @@ int accumulate_and_read_case() {
     return failures;
 }
 
+// Queries are offered as [head_dim, query_heads, columns] and pooled over each KV head's group and
+// over the tail of the columns (at most kQueryTokens of them).
+float query_value_at(int layer, int position, int head, int dim, int head_dim) {
+    return static_cast<float>(layer * 100 + position * 3 + head * head_dim + dim);
+}
+
+struct Queries {
+    std::vector<__nv_bfloat16> host;
+    void* device = nullptr;
+    int head_dim = 0;
+    int query_heads = 0;
+    int columns = 0;
+
+    Queries(int layer, int first_position, int columns_in, int head_dim_in, int query_heads_in)
+        : head_dim(head_dim_in), query_heads(query_heads_in), columns(columns_in) {
+        host.resize(static_cast<std::size_t>(head_dim) * query_heads * columns);
+        for (int c = 0; c < columns; ++c) {
+            for (int h = 0; h < query_heads; ++h) {
+                for (int d = 0; d < head_dim; ++d) {
+                    const std::size_t index = static_cast<std::size_t>(h) * head_dim + d +
+                                              static_cast<std::size_t>(head_dim) * query_heads * c;
+                    host[index] = __float2bfloat16(query_value_at(
+                        layer, first_position + c, h, d, head_dim));
+                }
+            }
+        }
+        cudaMalloc(&device, host.size() * sizeof(__nv_bfloat16));
+        cudaMemcpy(device, host.data(), host.size() * sizeof(__nv_bfloat16),
+                   cudaMemcpyHostToDevice);
+    }
+    ~Queries() { cudaFree(device); }
+    [[nodiscard]] Tensor tensor() const {
+        return Tensor(device, DType::BF16, {head_dim, query_heads, columns});
+    }
+};
+
+int query_case() {
+    int failures = 0;
+    constexpr int kHeadDim = 2;
+    constexpr int kKvHeads = 2;
+    constexpr int kGroup = 2;
+    constexpr int kQueryHeads = kKvHeads * kGroup;
+    constexpr int kColumns = 5;
+
+    KvRecallCursor cursor(1, kHeadDim, kKvHeads, 4, 4);
+    failures += expect_throws([&] { (void)cursor.query(0); }, "no query before capture");
+
+    Queries queries(0, 0, kColumns, kHeadDim, kQueryHeads);
+    cursor.capture_query(0, queries.tensor(), nullptr);
+    const float* pooled = cursor.query(0);
+    for (int kv = 0; kv < kKvHeads; ++kv) {
+        for (int d = 0; d < kHeadDim; ++d) {
+            double sum = 0.0;
+            for (int c = 0; c < kColumns; ++c) {
+                for (int r = 0; r < kGroup; ++r) {
+                    const int head = kv * kGroup + r;
+                    sum += static_cast<double>(__bfloat162float(__float2bfloat16(
+                        query_value_at(0, c, head, d, kHeadDim))));
+                }
+            }
+            const double want = sum / static_cast<double>(kGroup * kColumns);
+            const double got = static_cast<double>(pooled[kv * kHeadDim + d]);
+            if (std::fabs(got - want) > 1e-5) {
+                std::cerr << "FAIL: query kv " << kv << " dim " << d << ": got " << got
+                          << " want " << want << '\n';
+                ++failures;
+            }
+        }
+    }
+
+    // A prompt longer than the pool keeps only its tail: the head of the columns must not be seen.
+    constexpr int kLongColumns = 600;
+    KvRecallCursor capped(1, 1, 1, 4, 4);
+    Queries long_queries(0, 0, kLongColumns, 1, 1);
+    capped.capture_query(0, long_queries.tensor(), nullptr);
+    double tail_sum = 0.0;
+    const int pooled_columns = KvRecallCursor::kQueryTokens;
+    for (int c = kLongColumns - pooled_columns; c < kLongColumns; ++c) {
+        tail_sum += static_cast<double>(
+            __bfloat162float(__float2bfloat16(query_value_at(0, c, 0, 0, 1))));
+    }
+    const double tail_want = tail_sum / static_cast<double>(pooled_columns);
+    failures += expect(std::fabs(static_cast<double>(capped.query(0)[0]) - tail_want) < 1e-5,
+                       "only the tail of a long prompt is pooled");
+
+    failures += expect_throws([&] { (void)capped.query(1); }, "a layer outside the cursor");
+    cursor.reset();
+    failures += expect_throws([&] { (void)cursor.query(0); }, "reset forgets the query");
+    return failures;
+}
+
 int partial_block_case() {
     int failures = 0;
     constexpr int kHeadDim = 1;
@@ -210,6 +301,7 @@ int invalid_case() {
 int main() {
     int failures = 0;
     failures += accumulate_and_read_case();
+    failures += query_case();
     failures += partial_block_case();
     failures += invalid_case();
 

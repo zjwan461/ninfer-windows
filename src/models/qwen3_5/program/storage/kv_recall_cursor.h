@@ -29,6 +29,16 @@ public:
     void capture_layer(std::int32_t layer, const Tensor& pre_rope_keys,
                        cudaStream_t stream) override;
 
+    // Pools the offered queries per KV head and keeps them for the boundary score. Queries arrive in
+    // the same space as the keys (before the rotation); only the last `kQueryTokens` columns of the
+    // chunk are pooled, because a boundary only asks about the end of the prompt.
+    void capture_query(std::int32_t layer, const Tensor& pre_rope_queries,
+                       cudaStream_t stream) override;
+
+    // Pooled query of one layer, layout [head_dim, kv_heads]: one vector per KV head, already
+    // averaged over its query-head group and over the pooled columns. Valid after capture_query().
+    [[nodiscard]] const float* query(std::int32_t layer) const;
+
     // Finishes the turn for a sink that was handed the canonical prefill: publishes the means and
     // reports what was captured, so a live run shows the seam ran.
     void end_of_prefill(cudaStream_t stream) override;
@@ -50,6 +60,10 @@ public:
 
     void reset();
 
+    // How many trailing columns of a chunk a boundary pools into one query. The reference
+    // implementation uses the last user message, capped at 512 columns.
+    static constexpr std::int32_t kQueryTokens = 512;
+
 private:
     [[nodiscard]] std::size_t means_per_layer() const noexcept;
 
@@ -63,6 +77,10 @@ private:
     std::vector<DeviceBuffer> counts_;
     std::vector<DeviceBuffer> means_;
     std::vector<std::vector<float>> block_means_;
+    // One pooled query per layer, [head_dim, kv_heads]; the shape is fixed, so a plain vector holds
+    // it across layers.
+    std::vector<float> queries_;
+    std::vector<bool> query_valid_;
 
     std::int32_t captured_columns_ = 0;
     std::int32_t turn_columns_     = 0;

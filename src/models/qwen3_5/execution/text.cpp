@@ -878,7 +878,12 @@ void TextContext::attn_mix(const BlockParameters& w, Tensor& x, int fidx,
     ops::rmsnorm(k, p.key_norm, config_.rms_norm_eps, true, kn, s);
     // The keys are still free of the rotation here, which is the only place the recall index can
     // see the layout it needs; the rotation below rewrites the same memory in place.
-    if (recall_sink_ != nullptr) { recall_sink_->capture_layer(attention_layer, kn, s); }
+    if (recall_sink_ != nullptr) {
+        recall_sink_->capture_layer(attention_layer, kn, s);
+        // The query is pooled per KV head against the same blocks, and it has to be read here for
+        // the same reason: `text_rope` rotates qn in place on the next line.
+        recall_sink_->capture_query(attention_layer, qn, s);
+    }
     const Tensor& cache_positions =
         active_cache_positions_ != nullptr ? *active_cache_positions_ : io_.pos;
     const Tensor& rope_positions =

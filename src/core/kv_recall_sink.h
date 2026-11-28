@@ -27,6 +27,11 @@ public:
     virtual void capture_layer(std::int32_t layer, const Tensor& pre_rope_keys,
                                cudaStream_t stream) = 0;
 
+    // The queries of the same columns, also before the rotation: the recall score compares a query
+    // with a block mean, so a sink needs both sides in the same space. Offered right after
+    // capture_layer for the same layer and the same columns.
+    virtual void capture_query(std::int32_t, const Tensor&, cudaStream_t) {}
+
     // The canonical prefill consumed the whole prompt for this turn. A sink that publishes derived
     // state (means, counts, a summary) finishes it here; the default sink has nothing to do.
     virtual void end_of_prefill(cudaStream_t) {}

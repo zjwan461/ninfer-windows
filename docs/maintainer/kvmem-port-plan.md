@@ -150,16 +150,16 @@ ordinary_host_ingress->rope_positions[row]  = checked_i32(frontier, ...) + seque
 
 **这是整条路上最省力的一点**：被丢掉的历史全部在 frontier 之后不会回来，所以新 token 的原始位置恒等于 `压实后 frontier + 丢掉的总 token 数`——一个标量。也就是说现有的 `rope_delta` 足够表达压实视图，**不需要逐 token 位置张量，也不需要 re-RoPE**；cache 里的 K 当初写入时的相位原样保留，读回来照旧正确。这与第 10 节实测"按原始位置旋转 + 按压实位置限范围"的结论是同一条。
 
-**7.3 需要新增的方法与调用点。**
+**7.3 用"广义 fork"而不是"原地重发布"。**
 
-- `KVAddressSpaceStore::republish_compacted(KVAddressSpaceHandle, std::span<const LogicalKVPageHandle> ordered)`，放在 `publish_membership` 旁边，照抄前缀 fork 的发布顺序（`kv_store.h:1162-1195`）：
-  1. 校验每个 logical page 有效、`device_resident` 为真、`can_retain_reference(logical, false)` 为真；
-  2. 先把 physical 顺序 `tables_->publish(row, 0, scratch)` 发出去；
-  3. 对每个页 `retain_reference(logical,false)` + `protect_coverage(logical, kPagedKVPageSize)`（`kv_store.h:533`、`:568`）；
-  4. 释放旧 membership 中不再出现的页的 active reference（`kv_store.h:525`），新 membership 逐页 `retain_active_reference`（`:516`）；
-  5. 置 `page_count = ordered.size()`，`active` 保持不变。
-- 调用点：请求边界、continuation 发布之后（`src/models/qwen3_5/program/prefill.cpp:646` 的 `publish_continuation` 门），选择结果来自本次 prefill 各块的分数（`select_kv_blocks`）与页序（`build_kv_view`）。
-- 记账：同一处 `sequence.rope_delta += dropped_tokens`，`execution_frontier = visible_tokens`。
+最初的写法是在活地址上做一次原地 `republish_compacted`。读透了 `KVPrefixForkReservation`（`kv_store.h:131-182`，持有 `frontier_`、`full_pages_`、`page_reservation_`、`row_`）与 `commit_prefix_fork`（`:1135-1195`）之后，更好的形状是**把前缀 fork 的"前缀"换成"显式页序"**：
+
+- 前缀 fork 已经做完了我们要的全部动作：逐个 `retain_reference(page,false)` + `protect_coverage`、`tables_->publish(row, 0, scratch)`、给源地址的对应页记 active reference、必要时搬尾页 —— 只是它读的页序是 `membership(source, page)` 的前 `full_pages_` 个。
+- 所以新增的是一个 `KvCompactedForkRequest{source, ordered_pages, entitlement, frontier}` 与一个 `commit_compacted_fork`，提交时按 `ordered_pages` 走同一套 retain/publish/active-reference 代码，源地址照旧走 `deactivate` / `release` 的既有生命周期。
+- 好处是**没有"活地址被就地改了一半"的窗口**：旧地址在新地址发布前一直自洽，失败就整体回滚，正是这条路径已经被测试过的性质。原地重发布则要自己保证成员表、引用计数、`reservation`、`checkpoint_frontier` 四者同时一致，而 `reservation` 事实上无法在活地址上重排（见 7.5）。
+- 代价是多一次地址激活/停用，但 compaction 每个请求只发生在**请求边界**，不在 decode 内循环里，这点开销看不见。
+
+调用点不变：请求边界、continuation 发布之后（`src/models/qwen3_5/program/prefill.cpp:646` 的 `publish_continuation` 门），页序来自 `build_kv_view`、块集合来自 `select_kv_blocks`。记账同一处：`sequence.rope_delta += dropped_tokens`，`execution_frontier = visible_tokens`。
 
 **7.4 动之前必须确认的三件事。**
 

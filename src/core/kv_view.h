@@ -89,4 +89,31 @@ struct KvViewBoundary {
                                                 std::int32_t visible_tokens,
                                                 std::int32_t current_rope_delta);
 
+/**
+ * What a sequence has to believe once a compacted view is installed in place of its full
+ * history.
+ *
+ * The three numbers are the ones the decode path already reads per row: `visible_tokens`
+ * becomes the address's frontier (and therefore `cache_positions`), `rope_delta` is added
+ * to it to produce `rope_positions`, and `next_sample_position` is that sum — the position
+ * the *next* token must be sampled at. It must equal the original token count, because the
+ * view dropped tokens but the timeline did not move: a compaction that changed this number
+ * would silently rotate every later query.
+ */
+struct SequenceViewUpdate {
+    std::int32_t visible_tokens       = 0;
+    std::int32_t rope_delta           = 0;
+    std::int32_t next_sample_position = 0;
+};
+
+/**
+ * Converts one view boundary plus the sequence's original token count into the numbers above.
+ *
+ * Throws std::invalid_argument when the boundary does not describe a view of that history
+ * (a frontier past it, a negative count) or when the resulting sample position would not be
+ * the original position — the condition that makes "no re-rope" safe.
+ */
+[[nodiscard]] SequenceViewUpdate plan_sequence_view(std::int32_t committed_tokens,
+                                                    const KvViewBoundary& boundary);
+
 } // namespace ninfer::core

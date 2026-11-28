@@ -12,7 +12,9 @@ using ninfer::core::build_kv_view;
 using ninfer::core::KvView;
 using ninfer::core::KvViewSpec;
 using ninfer::core::KvViewBoundary;
+using ninfer::core::plan_sequence_view;
 using ninfer::core::plan_view_boundary;
+using ninfer::core::SequenceViewUpdate;
 
 int expect(bool condition, const char* label) {
     if (!condition) {
@@ -171,6 +173,45 @@ int boundary_case() {
     return failures;
 }
 
+int sequence_view_case() {
+    int failures = 0;
+    const auto whole = plan_view_boundary(16896, 16896, 0);
+    failures += expect_throws([&] { (void)plan_sequence_view(0, whole); }, "an empty position");
+
+    // Nothing dropped: the sequence keeps the numbers it already had.
+    const SequenceViewUpdate identity = plan_sequence_view(16896, whole);
+    failures += expect(identity.visible_tokens == 16896, "identity keeps the frontier");
+    failures += expect(identity.rope_delta == 0, "identity keeps the delta");
+    failures += expect(identity.next_sample_position == 16896, "identity keeps the position");
+
+    // A dropped prefix: the address shrinks, the timeline does not move.
+    const auto dropped              = plan_view_boundary(16896, 8192, 0);
+    const SequenceViewUpdate update = plan_sequence_view(16896, dropped);
+    failures += expect(update.visible_tokens == 8192, "a dropped prefix shrinks the frontier");
+    failures += expect(update.rope_delta == 8704, "the dropped tokens become the delta");
+    failures += expect(update.next_sample_position == 16896,
+                       "the next sample stays on the original timeline");
+
+    // A second compaction accumulates: the delta absorbs the second drop, and the position the
+    // sequence already reported does not move.
+    const auto again                = plan_view_boundary(8192, 4096, update.rope_delta);
+    const SequenceViewUpdate second = plan_sequence_view(16896, again);
+    failures += expect(second.visible_tokens == 4096, "a further view shrinks again");
+    failures += expect(second.rope_delta == update.rope_delta + 4096, "deltas accumulate");
+    failures += expect(second.next_sample_position == 16896, "the position never moves");
+
+    // A view that forgot to carry its dropped tokens is refused rather than compensated for.
+    KvViewBoundary broken = dropped;
+    broken.rope_delta     = 100;
+    failures += expect_throws([&] { (void)plan_sequence_view(16896, broken); },
+                              "a view that loses its delta is rejected");
+    KvViewBoundary past = dropped;
+    past.execution_frontier = 17000;
+    failures += expect_throws([&] { (void)plan_sequence_view(16896, past); },
+                              "a view beyond the position is rejected");
+    return failures;
+}
+
 int main() {
     int failures = 0;
     failures += identity_case();
@@ -181,6 +222,7 @@ int main() {
     failures += unsorted_selection_case();
     failures += invalid_case();
     failures += boundary_case();
+    failures += sequence_view_case();
 
     if (failures == 0) { std::cout << "kv_view: all checks passed\n"; }
     return failures == 0 ? 0 : 1;

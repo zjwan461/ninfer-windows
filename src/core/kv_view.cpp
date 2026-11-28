@@ -85,4 +85,27 @@ KvViewBoundary plan_view_boundary(std::int32_t original_frontier, std::int32_t v
     return boundary;
 }
 
+SequenceViewUpdate plan_sequence_view(std::int32_t committed_tokens,
+                                      const KvViewBoundary& boundary) {
+    if (committed_tokens <= 0) {
+        throw std::invalid_argument("kv_view: a sequence view needs a positive position");
+    }
+    if (boundary.execution_frontier < 0 || boundary.rope_delta < 0) {
+        throw std::invalid_argument("kv_view: sequence view fields must be nonnegative");
+    }
+    if (boundary.execution_frontier > committed_tokens) {
+        throw std::invalid_argument("kv_view: the view is beyond the sequence's position");
+    }
+    // A view shortens the cache, never the timeline: the frontier plus the accumulated delta
+    // must still name the position the next token will be sampled at.
+    if (boundary.execution_frontier + boundary.rope_delta != committed_tokens) {
+        throw std::invalid_argument("kv_view: a compacted view must not move the timeline");
+    }
+    SequenceViewUpdate update;
+    update.visible_tokens       = boundary.execution_frontier;
+    update.rope_delta           = boundary.rope_delta;
+    update.next_sample_position = committed_tokens;
+    return update;
+}
+
 } // namespace ninfer::core

@@ -5,6 +5,7 @@
 #include "models/qwen3_5/program/speculative/ngram_policy.h"
 #include "core/nvtx.h"
 #include "core/device.h"
+#include "core/kv_recall_decision.h"
 #include "ninfer/ops/prepare_ragged_prefix.h"
 #include "ninfer/ops/sampling.h"
 #include "ninfer/ops/scatter.h"
@@ -166,6 +167,74 @@ void ProgramImpl::copy_tail(SequenceState& sequence, const Tensor& source) {
     CUDA_CHECK(cudaMemcpyAsync(sequence.tail_hidden.data, source.data, sequence.tail_hidden.bytes(),
                                cudaMemcpyDeviceToDevice, device.stream));
     sequence.tail_hidden_valid = true;
+}
+
+void ProgramImpl::report_recall_boundary(SequenceState& sequence) {
+    if (!recall_cursor) { return; }
+    const std::int32_t blocks = recall_cursor->complete_blocks();
+    if (blocks <= 0) { return; }
+    const std::int32_t block_tokens = recall_cursor->block_tokens();
+    constexpr std::int32_t kPageTokens = 64;
+    const std::int32_t block_pages = std::max(1, block_tokens / kPageTokens);
+
+    // The reference recipe keeps a sink of one percent of the budget (clamped) and a recent tail.
+    struct Budget {
+        std::int32_t tokens = 98304;
+        std::int32_t recent = 1024;
+    };
+    static const Budget budget = [] {
+        Budget out;
+        if (const char* raw = std::getenv("NINFER_KV_RECALL_BUDGET")) {
+            const long parsed = std::strtol(raw, nullptr, 10);
+            if (parsed > 0) { out.tokens = static_cast<std::int32_t>(parsed); }
+        }
+        if (const char* raw = std::getenv("NINFER_KV_RECALL_RECENT")) {
+            const long parsed = std::strtol(raw, nullptr, 10);
+            if (parsed > 0) { out.recent = static_cast<std::int32_t>(parsed); }
+        }
+        return out;
+    }();
+    const std::int32_t sink_tokens =
+        std::clamp(budget.tokens / 100, 1024, 2048);
+
+    const std::int32_t committed = blocks * block_tokens;
+    const std::int32_t pages = committed / kPageTokens;
+    std::vector<std::int32_t> page_order(static_cast<std::size_t>(pages));
+    for (std::int32_t page = 0; page < pages; ++page) {
+        page_order[static_cast<std::size_t>(page)] = page;
+    }
+    std::vector<KvBlock> history;
+    history.reserve(static_cast<std::size_t>(blocks));
+    for (std::int32_t id = 0; id < blocks; ++id) {
+        history.push_back(KvBlock{.id = id,
+                                  .orig_pos_start = id * block_tokens,
+                                  .tokens = block_tokens,
+                                  .tier = KvBlockTier::Device,
+                                  .pinned = false});
+    }
+
+    core::KvRecallRequest request;
+    request.select.block_pages  = block_pages;
+    request.select.sink_pages   = std::max(block_pages, sink_tokens / kPageTokens);
+    request.select.recent_pages = std::max(block_pages, budget.recent / kPageTokens);
+    request.select.budget_pages = std::max(block_pages, budget.tokens / kPageTokens);
+    request.page_tokens         = kPageTokens;
+    request.committed_frontier  = committed;
+    request.current_rope_delta  = sequence.rope_delta;
+
+    try {
+        const core::KvRecallDecision decision =
+            core::plan_recall(request, recall_cursor->block_scores(), page_order, history);
+        std::fprintf(stderr,
+                     "kv recall: boundary %d tokens, %d blocks -> view %d tokens (dropped %d), "
+                     "%zu blocks kept, rope delta %d\n",
+                     committed, blocks, decision.boundary.execution_frontier,
+                     decision.boundary.dropped_tokens, decision.selected_blocks.size(),
+                     decision.boundary.rope_delta);
+    } catch (const std::exception& error) {
+        std::fprintf(stderr, "kv recall: boundary at %d tokens was refused: %s\n", committed,
+                     error.what());
+    }
 }
 
 void ProgramImpl::copy_round_token() {

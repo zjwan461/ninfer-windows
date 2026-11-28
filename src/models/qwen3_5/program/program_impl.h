@@ -1190,6 +1190,11 @@ private:
                           const ops::SamplingConfig& config);
     void set_device_i32(Tensor& tensor, std::int32_t value);
     void copy_tail(SequenceState& sequence, const Tensor& source);
+
+    // Reports what a recall boundary would keep at the prompt frontier: the blocks a budget selects
+    // and how many tokens the executed view would carry. Read-only; publishing the compacted address
+    // is a separate step.
+    void report_recall_boundary(SequenceState& sequence);
     void copy_round_token();
     void
     commit_generated_prefix_identity(SequenceState& sequence, std::uint32_t base_ledger_frontier,

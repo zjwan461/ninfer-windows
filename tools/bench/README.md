@@ -20,6 +20,24 @@ client, stages the NVFP4 artifact once in `/dev/shm`, stores raw/progress/Serve 
 JSON, and CSV summaries. The case catalog, exact profiles, TTFT boundary, and fixture qualification
 are documented in the dedicated README.
 
+## KV recall fidelity
+
+`run_kv_recall_fidelity.py` is the acceptance client for a windowed KV view. It plants four
+markers at fixed depths in a repeated corpus, asks two probes (list the markers; quote the opening
+lines verbatim) and compares two Serve endpoints byte for byte at `temperature 0`. A recall budget
+that drops a block fails silently — the answer stays well-formed and one fact short — so the verdict
+is exact text plus a marker count, not a reading of the prose.
+
+```bash
+python3 tools/bench/run_kv_recall_fidelity.py \
+  --baseline-url http://127.0.0.1:18200/v1 --candidate-url http://127.0.0.1:18201/v1 \
+  --corpus eval/corpora/perplexity-1m/data --chars 640000 --probe both \
+  --expect-codes 4 --out profiles/bench/kv/fidelity.json
+```
+
+The exit code is the verdict, and `--out` records both continuations with their timings. Documented
+in [`docs/maintainer/kvmem-port-plan.md`](../../docs/maintainer/kvmem-port-plan.md).
+
 ## Corpus baker
 
 `ninfer_bench` benchmarks prefill at an exact length by slicing the first `P` token ids of a

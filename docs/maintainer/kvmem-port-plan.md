@@ -118,7 +118,7 @@ WorkspacePlan plan_workspace(const WorkspaceBudget&, span<const KvBlock> residen
 ## 5. 验收
 
 1. **零回退**：短上下文套件在开关关闭时 bit-identical；开关打开但无逐出时也与今天一致。
-2. **等价性**：≤262,144 tokens 时，窗口化路径与全量路径输出逐字节一致（用第 10 节的 fidelity 探针，`codes` 与 `first_lines` 两个）。
+2. **等价性**：≤262,144 tokens 时，窗口化路径与全量路径输出逐字节一致（用第 10 节的 fidelity 探针，`codes` 与 `first_lines` 两个）。该探针已固化为 `tools/bench/run_kv_recall_fidelity.py`：同一 prompt、`temperature 0`、两个端点，逐字节比较生成文本，并对 `codes` 探针额外要求 4 个标记全部命中；退出码即判定，报告写 JSON。
 3. **容量**：30 万 / 50 万 / 80 万 tokens 上 needle 4/4；预算是记录项，不是调参项——预算不足必须被 retainer 判失败，而不是被"答案看起来合理"放过。
 4. **性能**：同长度 prefill 不低于今天；decode 不因视图间接寻址下降超过 5 %。
 5. **内存**：主机 pinned 用量随历史线性增长且可预测，1M tokens 在 64 GiB 机器上留有余量。

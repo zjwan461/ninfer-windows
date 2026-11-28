@@ -258,6 +258,13 @@ void ProgramImpl::report_recall_boundary(SequenceState& sequence) {
                      committed, blocks, decision.boundary.execution_frontier,
                      decision.boundary.dropped_tokens, decision.selected_blocks.size(),
                      decision.boundary.rope_delta);
+        if (std::getenv("NINFER_KV_RECALL_TRACE") != nullptr) {
+            std::fprintf(stderr, "kv recall: kept blocks");
+            for (const std::int32_t id : decision.selected_blocks) {
+                std::fprintf(stderr, " %d", id);
+            }
+            std::fprintf(stderr, "\n");
+        }
         // What the swap would do to the sequence: the cache shrinks, the timeline does not.
         const core::SequenceViewUpdate update =
             core::plan_sequence_view(history_tokens, decision.boundary);

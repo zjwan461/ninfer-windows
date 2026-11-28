@@ -136,9 +136,9 @@ control that the engine can already express.
 |---|---:|---|
 | Page-table / transport / assembler engineering | 90 % | the substrate exists; this is scheduling code |
 | Mean-K index and block selection | 85 % | additive op plus a host-side scorer |
-| Full-attention view ≈ native window within tolerance | 70 % | measured on the reference implementation, not here |
-| **GDN "state at the frontier" hypothesis** | **50-60 %** | untested; decides the whole level |
-| 1M workspace on this 32 GB card (host tier) | 80 % | 33 GiB fits in 64 GiB RAM; NVMe only for overflow |
+| Full-attention view ≈ native window within tolerance | 80 % | measured in section 9: 4/4 needles at 342k tokens through a 114,688-token window |
+| **GDN "state at the frontier" hypothesis** | **60 %** | the reference keeps recurrent state untouched and is coherent at 342k (section 9), but the carried-state truncation experiment is still unrun |
+| 1M workspace on this 32 GB card (host tier) | 85 % | 342k measured at 26 GiB pinned host KV; 1M ≈ 33 GiB at bf16 fits the 64 GiB machine |
 | 4-8 week single-session MVP | 70 % | Levels 1-2 land first and become its foundation |
 | Productised (multi-session, regression-tested, restart-safe) | 40 % | needs session ownership on top of the FIFO/no-preemption model |
 
@@ -183,3 +183,76 @@ means" once Levels 1 and 2 are counted.
 
 The first two steps are cheap enough to run before any commitment, and together they turn every
 number in this document into a measured one.
+
+## 9. Measured: the reference KVMem integration on a 32 GB card
+
+Everything above is planning. This section is measurement, taken 2026-11-28 on
+`nvidia-geforce-rtx-4080-super-sm89` (32 GB, driver 621.14, CUDA 13.4, Windows) with the Qwen3.8-27B
+int8 artifact (`E:\models\qwen3_8_27b_a8.ninfer`, 15.9 GiB weights, bf16 KV, thinking off).
+
+**The instrument.** `kvmem/kvmem` publishes a maintained NInfer integration
+(`backends/versions.json`: upstream `iamwavecut/ninfer-all` at `5fe3107`, seven ordered patches). The
+patched tree was reproduced bit-exactly — all seven patches apply clean to `5fe3107`, and
+`git write-tree` equals the declared `patched_tree c56b0a27…` — and built here for sm_89
+(`-DNINFER_CUDA_ARCHITECTURES=89 -DNINFER_KVMEM_SOURCE_DIR=<kvmem core>`, 1301 units, MSVC 14.44 +
+CUDA 13.4). That tree reads this repository's v3 artifact framing unchanged, so the numbers below are
+produced by the same artifact this fork ships, not by a re-conversion.
+
+**The workload.** A needle retainer: local corpus text sliced to a fixed size, four unique codes
+planted at 5 %, 35 %, 65 % and 99.5 % of the haystack, one user turn asking for the codes. Prompts are
+code-heavy (~3.4 chars/token), so sizes are reported in tokens.
+
+| Mode | `--max-context` | Device KV window | Host KV | Prompt | Recalled | TTFT | Prefill | Decode |
+|---|---:|---:|---:|---:|---|---:|---:|---:|
+| native | 208,512 | 208,512 tok (12.7 GiB) | 8 GiB | 186,934 | 4/4 | 165.0 s | 1.13k tok/s | 22.2 tok/s |
+| native | 393,216 | — | — | — | **startup FATAL** | — | — | — |
+| KVMem, B=36,864 | 208,512 | 53,248 | 20,480 MiB | 186,934 | 3/4 | 140.8 s | 1.33k tok/s | 35.3 tok/s |
+| KVMem, B=65,536 | 208,512 | 81,920 | 20,480 MiB | 186,934 | 4/4 | 165.3 s | 1.13k tok/s | 31.2 tok/s |
+| KVMem, B=65,536 | 393,216 | 81,920 | 26,624 MiB | 342,354 | 3/4 | 317.7 s | 1.08k tok/s | 31.2 tok/s |
+| KVMem, B=98,304 | 393,216 | 114,688 | 26,624 MiB | 342,354 | **4/4** | 373.3 s | 918 tok/s | 28.2 tok/s |
+| KVMem, B=98,304, second turn | 393,216 | 114,688 | 26,624 MiB | 342,354 | **4/4** | **1.2 s** | cached | 28.2 tok/s |
+
+What the table says:
+
+1. **The capability gate is real and it is the native window.** At `--max-context 393216` the native
+   path does not start at all: "minimum Engine runtime reservation requires 26,274,490,368 bytes …
+   only 15,796,797,440 bytes are available after weights". The same request runs to 4/4 needles under
+   KVMem with a 114,688-token device window and 26 GiB of host KV. That is the whole argument for the
+   mechanism on this card: not speed, capacity.
+2. **Fidelity is budget-dependent, not free.** At the same 186,934-token prompt, B=36,864 loses the
+   middle needle and B=65,536 keeps all four; at 342,354 tokens the same shift (65,536 → 98,304)
+   turns 3/4 into 4/4. A recall budget that is too small fails quietly — it returns a plausible answer
+   with a missing fact, which is the failure mode section 6 acceptance criteria must catch.
+3. **Bounded attention is a decode win.** At the same 186,934-token prompt, decode goes 22.2 → 31.2
+   tok/s because the visible prefix is 81,920 tokens instead of 186,934. Prefill is untouched
+   (1.13k tok/s both), as expected: the history still has to be read once.
+4. **Costs are host memory and prefill time.** 342,354 tokens need 26 GiB pinned host KV at bf16 and
+   6m13s TTFT at 918 tok/s; the 64 GiB machine has room, but this is the accounting that decides how
+   far the workspace can grow before NVMe enters.
+5. **The second turn is the product.** Re-sending the identical 342,354-token history takes **1.2 s
+   TTFT / 2.7 s total** at 100 % shared-prefix cache (`cache 342,347 (100.0%)`), against 6m13s cold —
+   a 300× reduction. An agent that appends one step to a 342k workspace therefore pays the prefill
+   once, not once per step. That is the number that makes a large workspace usable, and it comes from
+   the verified-history reuse path, not from the selection heuristic.
+
+**Operational pitfalls found while measuring** (all of them cost a run):
+
+- `--kvmem-query-max-tokens` defaults to 0, meaning *capture the whole prompt*. At 187k tokens that is
+  a multi-TB Query capture and the request dies with `bad allocation` after prefill. The reference
+  recipe's 512 is not a tuning knob, it is a precondition.
+- `--kvmem-host-mib` must cover the *whole* history, not the device window: at 187k tokens bf16 that
+  is 11.4 GiB, so the recipe's 12,288 MiB is marginal and 20,480 MiB is not. The failure is again
+  `bad allocation` at generation start, after the prefill has already been paid.
+- `--kvmem` is a switch; the budget is `--kvmem-budget N` (`--kvmem 36864` is an "unknown argument").
+- Native capacity is decided at startup from free VRAM; KVMem replaces it with an explicit
+  device window (`B + R`), which is why the free-VRAM line drops from 931 MiB to 7-11 GiB.
+
+**Reproducing the harness.** The patched reference tree lives at `E:\workspaces\ai\_kvmem-ref`
+(branch `kvmem-patched`, `git write-tree` = `c56b0a27…`), the KVMem core at `E:\workspaces\kvmem`;
+build with
+`cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=89 -DNINFER_KVMEM_SOURCE_DIR=E:/workspaces/kvmem/kvmem -DBUILD_TESTING=OFF`.
+`-DBUILD_TESTING=ON` fails on this machine at `tests/CMakeLists.txt:1 find_package(Python3)`.
+The serving line used for the 342k row is
+`ninfer-serve.exe <artifact> --max-context 393216 --no-thinking --kvmem --kvmem-budget 98304 --kvmem-host-mib 26624 --kvmem-gen-reserve 16384 --kvmem-sink-tokens 12288 --kvmem-recent-tokens 1024 --kvmem-query-max-tokens 512 --port 18200`
+and the needle driver is `E:\workspaces\ai\_tmp\needle_test.py` (stdlib only, run with
+`E:\software\miniconda3\python.exe`).

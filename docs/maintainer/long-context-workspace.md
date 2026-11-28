@@ -25,6 +25,11 @@ building.
 - One 256K lane already fits the 4080 SUPER: peak 24.5 GB per
   [NINFER_4080S_BASELINE.md](../../NINFER_4080S_BASELINE.md) section 4, alongside 131072/4 (30.0 GB)
   and 262144/2 (29.5 GB). Nothing needs to change for the native window.
+  **Measured caveat (section 9):** with the 15.9 GiB int8 Qwen3.8-27B artifact in *this* tree,
+  `--max-context 262144` refuses to start — "requested Engine runtime reservation requires
+  17,672,843,008 bytes, but only 15,813,574,656 bytes are available for runtime capacity" — while
+  208,512 starts with 1.30 GB of slack. The baseline's 24.5 GB peak must be a different configuration
+  (KV dtype or artifact); on this card, with this artifact, the practical native ceiling is ~208K.
 - Qwen3.8-27B is hybrid: 48 GDN layers with O(1) recurrent state and **16 full-attention layers**
   (`full_attention_interval 4`). At 4 KV heads × head_dim 256 × K+V, one token costs 16 × 4 × 256 ×
   2 × 2 B = **64 KiB at fp16, ≈33 KiB at 4-bit**; the 262144 measurement implies 32.8 KiB/token,
@@ -204,6 +209,8 @@ code-heavy (~3.4 chars/token), so sizes are reported in tokens.
 
 | Mode | `--max-context` | Device KV window | Host KV | Prompt | Recalled | TTFT | Prefill | Decode |
 |---|---:|---:|---:|---:|---|---:|---:|---:|
+| this fork, native | 208,512 | 208,512 tok (12.7 GiB) | 8 GiB | 186,934 | 4/4 | 136.6 s | 1.37k tok/s | 22.6 tok/s |
+| this fork, native, second turn | 208,512 | 208,512 tok | 8 GiB | 186,934 | 4/4 | **0.58 s** | cached | 22.8 tok/s |
 | native | 208,512 | 208,512 tok (12.7 GiB) | 8 GiB | 186,934 | 4/4 | 165.0 s | 1.13k tok/s | 22.2 tok/s |
 | native | 393,216 | — | — | — | **startup FATAL** | — | — | — |
 | KVMem, B=36,864 | 208,512 | 53,248 | 20,480 MiB | 186,934 | 3/4 | 140.8 s | 1.33k tok/s | 35.3 tok/s |
@@ -230,15 +237,21 @@ What the table says:
 4. **Costs are host memory and prefill time.** 342,354 tokens need 26 GiB pinned host KV at bf16 and
    6m13s TTFT at 918 tok/s; the 64 GiB machine has room, but this is the accounting that decides how
    far the workspace can grow before NVMe enters.
-5. **The second turn is the product.** Re-sending the identical 342,354-token history takes **1.2 s
-   TTFT / 2.7 s total** at 100 % shared-prefix cache (`cache 342,347 (100.0%)`), against 6m13s cold —
-   a 300× reduction. An agent that appends one step to a 342k workspace therefore pays the prefill
-   once, not once per step. That is the number that makes a large workspace usable, and it comes from
-   the verified-history reuse path, not from the selection heuristic.
+5. **The second turn is the product — and this fork already has it.** Re-sending an identical
+   186,934-token history to this fork's own `ninfer-serve` takes **584 ms TTFT / 2.2 s total** at
+   `cache 186,927 (100.0%, turn closure)`; the reference at 342,354 tokens takes **1.2 s TTFT /
+   2.7 s total** at `cache 342,347 (100.0%, shared prefix)`. Both are the existing context-cache
+   path, not KVMem. So the large-workspace latency argument is already won at the native window —
+   what KVMem adds is the ability to go **past** that window (row 2 versus row 6) and a bounded
+   attention window for decode.
 6. **The newer strategy is worth taking.** `--kvmem-recall-strategy layerwise --kvmem-query-scorer
    meanq-cosine` reaches the same 4/4 at 342k with a 325.7 s TTFT instead of 373.3 s (-13 %), so the
    port should target the layerwise Query/Pressure path rather than the legacy cumulative-attention
    one.
+7. **This fork is the faster prefill today.** The same 186,934-token prompt costs 136.6 s TTFT
+   (1.37k tok/s) here versus 165.0 s (1.13k tok/s) in the reference build, with equal decode
+   (22.6 vs 22.2 tok/s) and equal recall (4/4). A port therefore has to preserve this fork's prefill,
+   which is the part the reference loses to KVMem bookkeeping at long depth.
 
 **Operational pitfalls found while measuring** (all of them cost a run):
 

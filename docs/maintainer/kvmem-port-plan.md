@@ -210,6 +210,24 @@ ordinary_host_ingress->rope_positions[row]  = checked_i32(frontier, ...) + seque
 第 2 条要求在事务里加一条与 checkpoint 发布并列的分支。两者都必须与 `sequence.ledger`、prefix digests、
 checkpoint 覆盖一起改，属于会改变产品行为的集成，应当单独提交、单独验收。
 
+### 7.8 尾页：压实的最后一块拼图（本轮读码得出，尚未动手）
+
+`prepare_compacted_fork` 要求目标地址覆盖 `frontier` 个 token、且 `pages_for_tokens(frontier) ==
+保留页数`、每一页都是**整页**（`committed_columns >= kPagedKVPageSize`）。而 prompt 结束时的
+`sequence.text_kv_valid` 一般不是 64 的倍数，最后那个**不完整页**（1..63 列）不属于任何保留页。
+
+于是"把视图换成地址"这一步现在有两种写法：
+
+- **只压到整页边界**：`frontier = floor(text_kv_valid / 64) * 64`，剩下不足一页的 token 不保留。
+  这会**丢掉尾部几列**，下一次 decode 的 attention 就少看几个 token——静默的精度损失，不能接受。
+- **让 fork 支持部分尾页**：`prepare_prefix_fork` 本来就有 `tail_columns` 与
+  `materialize_transfer_destination` 的尾页拷贝路径（`kv_store.h:1054-1077`），`commit_prefix_fork`
+  也照着 `tail_destination_` 搬列。把它接进压实版本（保留页 + 一个尾页拷贝）是把这条路走通的正解，
+  代价是要给 store 测试补"整页 + 尾页"的组合，并想清楚尾页在新地址里是重拷还是共享。
+
+在它落地之前，`NINFER_KV_RECALL_APPLY` 只会在 `dropped_tokens == 0` 之外什么都不做：决策照旧打印，
+地址一个字都不改。这也是本轮没有把 `apply` 接进主线的原因——不是时机没想清楚，而是**最后一个字节还搬不过去**。
+
 ## 8. 不在本计划内的做法
 
 - 不移植参考实现的存储格式与 397 文件补丁树本体（那是另一条血缘的引擎）。

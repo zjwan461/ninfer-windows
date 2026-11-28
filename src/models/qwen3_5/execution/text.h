@@ -20,6 +20,10 @@
 #include <cstdint>
 #include <functional>
 #include <span>
+
+namespace ninfer::core {
+class KvRecallSink;
+} // namespace ninfer::core
 #include <vector>
 
 namespace ninfer::models::qwen3_5::execution {
@@ -87,6 +91,10 @@ public:
     }
 
     void set_sampling(const ops::SamplingConfig* config) noexcept { sampling_config_ = config; }
+
+    // Opt-in: while set, every standard-attention layer offers its pre-rotation keys to the sink at
+    // the one moment they are free of the rotation. Null means the capture is inert.
+    void set_recall_sink(core::KvRecallSink* sink) noexcept { recall_sink_ = sink; }
 
     void set_prefill_split_frontier(std::int64_t position) noexcept {
         prefill_split_frontier_ = position;
@@ -160,7 +168,8 @@ private:
         return mtp_kv_.valid() || batch_mtp_kv_ != nullptr;
     }
 
-    void attn_mix(const BlockParameters& weights, Tensor& x, int index, Phase phase);
+    void attn_mix(const BlockParameters& weights, Tensor& x, int index, std::int32_t attention_layer,
+                  Phase phase);
     void gdn_mix(const BlockParameters& weights, Tensor& x, int index, Phase phase);
     void mlp_tail(const BlockParameters& weights, Tensor& x, Phase phase,
                   const ops::SparseMoeHints& hints);
@@ -247,6 +256,7 @@ private:
     const std::int32_t* proposal_head_ids_      = nullptr;
     int proposal_head_n_                        = 0;
     const ops::SamplingConfig* sampling_config_ = nullptr;
+    core::KvRecallSink*        recall_sink_     = nullptr;
     const MtpParameters* mtp_                   = nullptr;
 };
 

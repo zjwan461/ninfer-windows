@@ -27,6 +27,10 @@ public:
     virtual void capture_layer(std::int32_t layer, const Tensor& pre_rope_keys,
                                cudaStream_t stream) = 0;
 
+    // The canonical prefill consumed the whole prompt for this turn. A sink that publishes derived
+    // state (means, counts, a summary) finishes it here; the default sink has nothing to do.
+    virtual void end_of_prefill(cudaStream_t) {}
+
 protected:
     KvRecallSink() = default;
 };

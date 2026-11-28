@@ -12,6 +12,7 @@
 #include "models/qwen3_5/program/planning/startup.h"
 #include "models/qwen3_5/program/storage/draft_context.h"
 #include "models/qwen3_5/program/storage/host_kv_store.h"
+#include "models/qwen3_5/program/storage/kv_recall_cursor.h"
 #include "models/qwen3_5/program/storage/kv_store.h"
 #include "models/qwen3_5/program/storage/state_store.h"
 #include "models/qwen3_5/program/prefix_identity.h"
@@ -614,6 +615,9 @@ public:
     // widen to V+1. A round records and folds through the view of its own width.
     std::optional<GdnReplayRecords> narrow_replay_records;
     std::optional<ops::GdnReplayFoldPlan> narrow_replay_fold;
+    // Opt-in recall index for the KV recall path: null unless the environment asks for it, and
+    // advanced only by the canonical prefill.
+    std::unique_ptr<KvRecallCursor> recall_cursor;
 
     [[nodiscard]] const GdnReplayRecords* round_replay_records(std::uint32_t width) const;
     [[nodiscard]] const ops::GdnReplayFoldPlan& round_replay_fold(std::uint32_t width) const;

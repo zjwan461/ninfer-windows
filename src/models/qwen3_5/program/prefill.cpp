@@ -68,16 +68,24 @@ PrefillChunkResult prefill_text_chunk(PrefillContext& state, std::span<const Tok
                      state.text_kv_base, state.mtp_kv, &state.text_cache, state.mtp_cache);
     configure_text_card(card, state.execution, state.sampling, state.state_source_slot,
                         state.state_destination_slot, state.mtp_proposal_extent);
+    card.set_recall_sink(state.execution.recall);
     card.set_rewrite_checkpoint_hidden_output(state.rewrite_checkpoint_hidden);
     card.set_prefill_split_frontier(split_frontier ? static_cast<std::int64_t>(*split_frontier)
                                                    : -1);
     const std::span<const int> prompt(ids.data(), ids.size());
+    auto finish_turn = [&state, finalize_at_end](PrefillChunkResult result) {
+        if (finalize_at_end && state.execution.recall != nullptr) {
+            state.execution.recall->end_of_prefill(state.execution.device.stream);
+        }
+        return result;
+    };
     if (state.dflash != nullptr) {
         DFlashFeatureSink sink = make_dflash_prefill_sink(state);
-        return card.prefill_chunk(prompt, state.text_kv_base, nominal_length, finalize_at_end,
-                                  sink);
+        return finish_turn(card.prefill_chunk(prompt, state.text_kv_base, nominal_length,
+                                              finalize_at_end, sink));
     }
-    return card.prefill_chunk(prompt, state.text_kv_base, nominal_length, finalize_at_end);
+    return finish_turn(card.prefill_chunk(prompt, state.text_kv_base, nominal_length,
+                                          finalize_at_end));
 }
 
 PrefillChunkResult prefill_multimodal_chunk(PrefillContext& state, const PreparedPromptData& prompt,
@@ -91,15 +99,25 @@ PrefillChunkResult prefill_multimodal_chunk(PrefillContext& state, const Prepare
                      state.text_kv_base, state.mtp_kv, &state.text_cache, state.mtp_cache);
     configure_text_card(card, state.execution, state.sampling, state.state_source_slot,
                         state.state_destination_slot, state.mtp_proposal_extent);
+    card.set_recall_sink(state.execution.recall);
     card.set_rewrite_checkpoint_hidden_output(state.rewrite_checkpoint_hidden);
     card.set_prefill_split_frontier(split_frontier ? static_cast<std::int64_t>(*split_frontier)
                                                    : -1);
     if (state.dflash != nullptr) {
         DFlashFeatureSink sink = make_dflash_prefill_sink(state);
-        return card.prefill_chunk(prompt, state.text_kv_base, nominal_length, vision,
-                                  finalize_at_end, sink);
+        PrefillChunkResult result = card.prefill_chunk(prompt, state.text_kv_base, nominal_length,
+                                                       vision, finalize_at_end, sink);
+        if (finalize_at_end && state.execution.recall != nullptr) {
+            state.execution.recall->end_of_prefill(state.execution.device.stream);
+        }
+        return result;
     }
-    return card.prefill_chunk(prompt, state.text_kv_base, nominal_length, vision, finalize_at_end);
+    PrefillChunkResult result = card.prefill_chunk(prompt, state.text_kv_base, nominal_length,
+                                                   vision, finalize_at_end);
+    if (finalize_at_end && state.execution.recall != nullptr) {
+        state.execution.recall->end_of_prefill(state.execution.device.stream);
+    }
+    return result;
 }
 
 void mtp_bridge_multimodal(PrefillContext& state, const PreparedPromptData& prompt,
@@ -1008,7 +1026,7 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
         execution::PrefillContext schedule_state{
             {device, parameters, work, state_images->linear(),
              replay_records ? &*replay_records : nullptr, io, prefill_hidden, prefill_chunk,
-             proposal_head},
+             proposal_head, recall_cursor.get()},
             text_kv_view(sequence),
             mtp_kv_view(sequence),
             decoder->text_kv,

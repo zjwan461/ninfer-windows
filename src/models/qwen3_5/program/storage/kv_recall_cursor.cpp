@@ -6,6 +6,8 @@
 #include <stdexcept>
 #include <string>
 
+#include <cstdio>
+
 namespace ninfer::models::qwen3_5::detail {
 
 using core::KvRecallSink;
@@ -97,6 +99,14 @@ void KvRecallCursor::finish(cudaStream_t stream) {
         means_[index].copy_to_host(block_means_[index].data(), means_per_layer() * sizeof(float));
     }
     finished_ = true;
+}
+
+void KvRecallCursor::end_of_prefill(cudaStream_t stream) {
+    finish(stream);
+    std::fprintf(stderr,
+                 "kv recall: captured %d columns over %d layers -> %d complete blocks of %d\n",
+                 captured_columns_, layers_count_, complete_blocks(), block_tokens_);
+    std::fflush(stderr);
 }
 
 const std::vector<float>& KvRecallCursor::block_means(std::int32_t layer) const {

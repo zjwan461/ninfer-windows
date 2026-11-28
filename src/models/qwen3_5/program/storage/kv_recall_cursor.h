@@ -29,6 +29,10 @@ public:
     void capture_layer(std::int32_t layer, const Tensor& pre_rope_keys,
                        cudaStream_t stream) override;
 
+    // Finishes the turn for a sink that was handed the canonical prefill: publishes the means and
+    // reports what was captured, so a live run shows the seam ran.
+    void end_of_prefill(cudaStream_t stream) override;
+
     // Turns the device sums into the published block means and copies them to the host. Called at the
     // boundary, once, after the prefill that fed the cursor.
     void finish(cudaStream_t stream);

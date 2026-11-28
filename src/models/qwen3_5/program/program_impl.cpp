@@ -101,6 +101,29 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
         });
     }
     const DeviceSpan backing = persistent.alloc_bytes(plan.persistent.bytes, 256);
+    // Opt-in: keep the Mean-K block means of the pre-rotation keys, so a request boundary can rank
+    // history blocks later. Off unless asked, so the default path is unchanged.
+    if (const char* recall = std::getenv("NINFER_KV_RECALL");
+        recall != nullptr && recall[0] != '\0' && recall[0] != '0') {
+        const TextConfig& text = parameters.model.config().text;
+        if (!text.attention.has_value()) {
+            throw std::invalid_argument("Qwen3.5 recall capture requires a text attention config");
+        }
+        std::int32_t attention_layers = 0;
+        for (const MixerKind kind : text.layer_types) {
+            if (kind == MixerKind::FullAttention) { ++attention_layers; }
+        }
+        if (attention_layers <= 0) {
+            throw std::invalid_argument("Qwen3.5 recall capture found no full-attention layers");
+        }
+        constexpr std::int32_t block_tokens = 128;
+        const auto block_capacity = static_cast<std::int32_t>(std::max<std::uint32_t>(
+            1U, capacity / static_cast<std::uint32_t>(block_tokens)));
+        recall_cursor = std::make_unique<KvRecallCursor>(
+            attention_layers, static_cast<std::int32_t>(text.attention->head_dim),
+            static_cast<std::int32_t>(text.attention->num_key_value_heads), block_tokens,
+            block_capacity);
+    }
     if (!plan.context_cache.max_private_continuations || !plan.context_cache.max_shared_prefixes) {
         throw std::logic_error("Qwen3.5 context cache options are not normalized");
     }

@@ -4,6 +4,7 @@
 #include "core/arena.h"
 #include "core/decode_graph.h"
 #include "core/device.h"
+#include "core/kv_recall_sink.h"
 #include "ninfer/ops/kv_cache_append.h"
 #include "ninfer/ops/sampling.h"
 #include "ninfer/ops/sliding_window_attention.h"
@@ -38,6 +39,10 @@ struct ExecutionCore {
     Tensor& prefill_hidden;
     std::uint32_t prefill_chunk;
     ProposalHead proposal_head;
+    // Set only when the program asked for a recall index; the canonical prefill and ordinary decode
+    // hand it to the text card, and every other path leaves it null so a speculative or recaptured
+    // step can never feed the index.
+    core::KvRecallSink* recall = nullptr;
 };
 
 struct PrefillContext {

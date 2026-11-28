@@ -136,6 +136,60 @@ int scores_case(int dim, int kv_heads, int q_heads, int blocks, bool zero_block)
                             PointwiseCriterion{kScoresTolerance, kScoresTolerance});
 }
 
+// Accumulates one history in chunks that do not line up with the blocks, then finalizes. The
+// oracle divides each block by its own column count, which is exactly what a device finalize does;
+// that is why a partial trailing block would have to be ignored by the caller, not by the kernel.
+int accumulate_case(int dim, int heads, int block_tokens, int total_columns, int chunk) {
+    std::vector<float> keys(static_cast<std::size_t>(dim) * heads * total_columns);
+    fill_uniform(keys, 0x51abU + static_cast<std::uint32_t>(total_columns + chunk), -1.0F, 1.0F);
+    round_to_bf16(keys);
+
+    const int blocks = (total_columns + block_tokens - 1) / block_tokens;
+
+    DeviceBuffer device_sums(static_cast<std::size_t>(dim) * heads * blocks * sizeof(float));
+    std::vector<float> zero_sums(static_cast<std::size_t>(dim) * heads * blocks, 0.0F);
+    device_sums.copy_from_host(zero_sums.data(), zero_sums.size() * sizeof(float));
+
+    DeviceBuffer device_counts(static_cast<std::size_t>(blocks) * sizeof(std::int32_t));
+    std::vector<std::int32_t> zero_counts(static_cast<std::size_t>(blocks), 0);
+    device_counts.copy_from_host(zero_counts.data(), zero_counts.size() * sizeof(std::int32_t));
+
+    Tensor sums_tensor(device_sums.p, DType::FP32, {dim, heads, blocks});
+    Tensor counts_tensor(device_counts.p, DType::I32, {blocks});
+
+    for (int first = 0; first < total_columns; first += chunk) {
+        const int columns = std::min(chunk, total_columns - first);
+        std::vector<float> slice(static_cast<std::size_t>(dim) * heads * columns);
+        for (int h = 0; h < heads; ++h) {
+            for (int d = 0; d < dim; ++d) {
+                for (int c = 0; c < columns; ++c) {
+                    slice[(static_cast<std::size_t>(h) * dim + d) * columns + c] =
+                        keys[(static_cast<std::size_t>(h) * dim + d) * total_columns + first + c];
+                }
+            }
+        }
+        DeviceBuffer device_slice = to_device_bf16(slice);
+        Tensor slice_tensor(device_slice.p, DType::BF16, {dim, heads, columns});
+        ops::kv_block_accumulate(slice_tensor, block_tokens, first, sums_tensor, counts_tensor,
+                                 nullptr);
+    }
+
+    DeviceBuffer device_means(static_cast<std::size_t>(dim) * heads * blocks * sizeof(float));
+    Tensor means_tensor(device_means.p, DType::FP32, {dim, heads, blocks});
+    ops::kv_block_finalize(sums_tensor, counts_tensor, means_tensor, nullptr);
+    cuda_synchronize();
+
+    const std::vector<double> got = from_device_f32(device_means, dim * heads * blocks);
+    const std::vector<double> expected =
+        reference_mean_keys(keys, dim, heads, total_columns, block_tokens);
+    const std::string label = "kv_block_accumulate/finalize D=" + std::to_string(dim) +
+                              " H=" + std::to_string(heads) + " T=" +
+                              std::to_string(total_columns) + " block=" +
+                              std::to_string(block_tokens) + " chunk=" + std::to_string(chunk);
+    return verify_pointwise(label, got, expected,
+                            PointwiseCriterion{kMeanKeysTolerance, kMeanKeysTolerance});
+}
+
 } // namespace
 
 int main() {
@@ -155,6 +209,11 @@ int main() {
     // Real model geometry: head_dim 256, 4 KV heads over 24 query heads, 128-token blocks.
     failures += mean_keys_case(256, 4, 1024, 128);
     failures += scores_case(256, 4, 24, 8, false);
+    // Incremental capture: 256-token prefill chunks over 128-token blocks, and chunks that straddle
+    // block boundaries (3-column chunks over 4-column blocks).
+    failures += accumulate_case(256, 4, 128, 1024, 256);
+    failures += accumulate_case(8, 2, 4, 9, 3);
+    failures += accumulate_case(8, 2, 4, 12, 5);
 
     if (failures == 0) { std::cout << "kv_block_pool: all checks passed\n"; }
     return failures == 0 ? 0 : 1;

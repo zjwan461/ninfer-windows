@@ -92,4 +92,70 @@ void kv_block_scores(const Tensor& query, const Tensor& means, Tensor& scores,
     detail::kv_block_scores_launch(query, means, scores, stream);
 }
 
+void kv_block_accumulate(const Tensor& keys, std::int32_t block_tokens,
+                         std::int32_t first_position, Tensor& sums, Tensor& counts,
+                         cudaStream_t stream) {
+    require_contiguous(keys, "keys", DType::BF16);
+    require_contiguous(sums, "sums", DType::FP32);
+    require_contiguous(counts, "counts", DType::I32);
+
+    if (keys.ne[3] != 1) {
+        throw std::invalid_argument("kv_block_pool: keys must be rank-3 [D,H,T]");
+    }
+    if (sums.ne[3] != 1) {
+        throw std::invalid_argument("kv_block_pool: sums must be rank-3 [D,H,B]");
+    }
+    if (counts.ne[1] != 1 || counts.ne[2] != 1 || counts.ne[3] != 1) {
+        throw std::invalid_argument("kv_block_pool: counts must be rank-1 [B]");
+    }
+    if (block_tokens <= 0) {
+        throw std::invalid_argument("kv_block_pool: block_tokens must be positive");
+    }
+    if (first_position < 0) {
+        throw std::invalid_argument("kv_block_pool: first_position must be nonnegative");
+    }
+    if (keys.ne[0] != sums.ne[0] || keys.ne[1] != sums.ne[1]) {
+        throw std::invalid_argument("kv_block_pool: sums must share keys' D and H");
+    }
+    const std::int32_t tokens = keys.ne[2];
+    if (tokens <= 0) {
+        throw std::invalid_argument("kv_block_pool: keys must carry at least one column");
+    }
+    // The chunk may span block boundaries, but it may not run past the last block it is charged to.
+    // The caller sizes sums/counts once for the whole history, so later chunks only need to fit.
+    const std::int32_t required = (first_position + tokens + block_tokens - 1) / block_tokens;
+    if (sums.ne[2] < required || counts.ne[0] != sums.ne[2]) {
+        throw std::invalid_argument("kv_block_pool: sums and counts must cover the chunk's blocks");
+    }
+
+    detail::kv_block_accumulate_launch(keys, block_tokens, first_position, sums, counts, stream);
+}
+
+void kv_block_finalize(const Tensor& sums, const Tensor& counts, Tensor& means,
+                       cudaStream_t stream) {
+    require_contiguous(sums, "sums", DType::FP32);
+    require_contiguous(counts, "counts", DType::I32);
+    require_contiguous(means, "means", DType::FP32);
+
+    if (sums.ne[3] != 1 || means.ne[3] != 1) {
+        throw std::invalid_argument("kv_block_pool: sums and means must be rank-3 [D,H,B]");
+    }
+    if (counts.ne[1] != 1 || counts.ne[2] != 1 || counts.ne[3] != 1) {
+        throw std::invalid_argument("kv_block_pool: counts must be rank-1 [B]");
+    }
+    if (sums.ne[0] != means.ne[0] || sums.ne[1] != means.ne[1] || sums.ne[2] != means.ne[2]) {
+        throw std::invalid_argument("kv_block_pool: means must have sums' shape");
+    }
+    if (counts.ne[0] != sums.ne[2]) {
+        throw std::invalid_argument("kv_block_pool: counts must have one entry per block");
+    }
+    for (int d = 0; d < 4; ++d) {
+        if (counts.ne[d] < 0) {
+            throw std::invalid_argument("kv_block_pool: counts dimensions must be nonnegative");
+        }
+    }
+
+    detail::kv_block_finalize_launch(sums, counts, means, stream);
+}
+
 } // namespace ninfer::ops

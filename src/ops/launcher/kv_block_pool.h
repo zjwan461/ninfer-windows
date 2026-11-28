@@ -16,4 +16,11 @@ void kv_block_mean_keys_launch(const Tensor& keys, std::int32_t block_tokens, Te
 void kv_block_scores_launch(const Tensor& query, const Tensor& means, Tensor& scores,
                             cudaStream_t stream);
 
+void kv_block_accumulate_launch(const Tensor& keys, std::int32_t block_tokens,
+                                std::int32_t first_position, Tensor& sums, Tensor& counts,
+                                cudaStream_t stream);
+
+void kv_block_finalize_launch(const Tensor& sums, const Tensor& counts, Tensor& means,
+                              cudaStream_t stream);
+
 } // namespace ninfer::ops::detail

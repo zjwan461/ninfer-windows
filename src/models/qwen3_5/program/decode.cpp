@@ -197,20 +197,39 @@ void ProgramImpl::report_recall_boundary(SequenceState& sequence) {
     const std::int32_t sink_tokens =
         std::clamp(budget.tokens / 100, 1024, 2048);
 
+    // The index only covers whole blocks; the sequence may hold up to block_tokens - 1 further
+    // tokens that belong to its unfinished last block. They are part of the history, so the plan
+    // is computed on the sequence's frontier and the tail block is scored as unselectable: it
+    // survives only because sink or recent always covers it.
     const std::int32_t committed = blocks * block_tokens;
-    const std::int32_t pages = committed / kPageTokens;
+    const std::int32_t history_tokens =
+        std::max(committed, static_cast<std::int32_t>(sequence.text_kv_valid));
+    const std::int32_t pages =
+        (history_tokens + kPageTokens - 1) / kPageTokens;
     std::vector<std::int32_t> page_order(static_cast<std::size_t>(pages));
     for (std::int32_t page = 0; page < pages; ++page) {
         page_order[static_cast<std::size_t>(page)] = page;
     }
     std::vector<KvBlock> history;
-    history.reserve(static_cast<std::size_t>(blocks));
+    history.reserve(static_cast<std::size_t>(blocks) + 1);
     for (std::int32_t id = 0; id < blocks; ++id) {
         history.push_back(KvBlock{.id = id,
                                   .orig_pos_start = id * block_tokens,
                                   .tokens = block_tokens,
                                   .tier = KvBlockTier::Device,
                                   .pinned = false});
+    }
+    // One call, one buffer: begin() and end() from two separate temporaries would form a range
+    // that belongs to no vector (and did, as a "vector too long" on the request path).
+    const std::vector<float> block_scores = recall_cursor->block_scores();
+    std::vector<float> scores(block_scores.begin(), block_scores.end());
+    if (history_tokens > committed) {
+        history.push_back(KvBlock{.id = blocks,
+                                  .orig_pos_start = committed,
+                                  .tokens = history_tokens - committed,
+                                  .tier = KvBlockTier::Device,
+                                  .pinned = false});
+        scores.push_back(-std::numeric_limits<float>::infinity());
     }
 
     core::KvRecallRequest request;
@@ -222,12 +241,12 @@ void ProgramImpl::report_recall_boundary(SequenceState& sequence) {
         std::min(pages, std::max(block_pages, budget.recent / kPageTokens));
     request.select.budget_pages = std::min(pages, std::max(block_pages, budget.tokens / kPageTokens));
     request.page_tokens         = kPageTokens;
-    request.committed_frontier  = committed;
+    request.committed_frontier  = history_tokens;
     request.current_rope_delta  = sequence.rope_delta;
 
     try {
         const core::KvRecallDecision decision =
-            core::plan_recall(request, recall_cursor->block_scores(), page_order, history);
+            core::plan_recall(request, scores, page_order, history);
         std::fprintf(stderr,
                      "kv recall: boundary %d tokens, %d blocks -> view %d tokens (dropped %d), "
                      "%zu blocks kept, rope delta %d\n",

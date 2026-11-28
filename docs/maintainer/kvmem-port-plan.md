@@ -260,6 +260,22 @@ store 测试里加的就是"整页 + 尾页"的组合：源 232 token（最后�
 `release(source)` → `plan_sequence_view` 写回 `rope_delta` / `text_kv_valid` / `execution_frontier` →
 `recall_cursor->reset()`。失败路径必须把序列留在原地址上（源已 deactivate，异常时重新 activate）。
 
+### 7.10 缩小缓存会打破“缓存长度 == ledger 长度”的不变量
+
+实测：`28438a12` 的换装成功（`applied view 4014 tokens, rope delta 10368`），但下一步就报
+`KV destructive truncate extends the frontier`。探针打印出真实参数：`truncate frontier 14382 committed 4014 pages 63`，
+调用点是 `src/models/qwen3_5/program/prefill.cpp:587` 的 `trim_sequence_kv(sequence, base, …)`（`base = staged.base`，
+即常驻前缀的**时间线**长度）；同一段代码紧接着执行 `sequence.text_kv_valid = base; sequence.ledger.resize(base);`。
+
+这说明引擎在这条路径上假设两件事同时成立：缓存里的 token 数与 ledger 长度相等，且提交前沿等于序列前沿。压缩视图只能改前者（缓存），不能改后者（时间线）；而 `ledger.resize(base)` 会把时间线也砍到缓存长度，与 `rope_delta` 的设计直接矛盾。
+
+结论：压缩不能在生成过程中的任意点发生。它只能发生在
+1. 当前回合结束、序列被停放（turn closure / checkpoint）时，或
+2. 下一个请求开始、在新的 ledger 建立之前。
+
+两者都要求把“缓存前沿”从 ledger 长度里分离出来存储（现在只有 `text_kv_valid` 一个字段，它在这条路径上会被覆盖）。
+在那之前，`NINFER_KV_RECALL_APPLY` 必须保持默认关闭。
+
 ## 8. 不在本计划内的做法
 
 - 不移植参考实现的存储格式与 397 文件补丁树本体（那是另一条血缘的引擎）。

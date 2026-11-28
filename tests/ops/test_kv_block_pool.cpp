@@ -190,6 +190,101 @@ int accumulate_case(int dim, int heads, int block_tokens, int total_columns, int
                             PointwiseCriterion{kMeanKeysTolerance, kMeanKeysTolerance});
 }
 
+// End to end over the three ops: keys streamed in chunks (as prefill delivers them) -> block sums ->
+// means -> cosine scores against a query. The planted block repeats the query direction, so if the
+// chunk-to-block mapping or the published layout were wrong, the wrong block would score highest.
+int recall_chain_case(int dim, int kv_heads, int q_heads, int block_tokens, int blocks, int chunk) {
+    const int total_columns = block_tokens * blocks;
+    const std::vector<float> query(static_cast<std::size_t>(dim) * q_heads, 0.0F);
+    std::vector<float> query_vec(query.begin(), query.end());
+    fill_uniform(query_vec, 0x6d31U, 0.5F, 1.5F);
+    round_to_bf16(query_vec);
+
+    const int planted = 3;
+    std::vector<float> keys(static_cast<std::size_t>(dim) * kv_heads * total_columns, 0.0F);
+    fill_uniform(keys, 0x77c1U, -0.25F, 0.25F);
+    // Every column of the planted block repeats the query direction, so the block mean is exactly
+    // that direction and the cosine must come out at 1.
+    for (int h = 0; h < kv_heads; ++h) {
+        for (int d = 0; d < dim; ++d) {
+            const float value =
+                [&] {
+                    const int group = q_heads / kv_heads;
+                    float     pooled = 0.0F;
+                    for (int r = 0; r < group; ++r) {
+                        pooled += query_vec[static_cast<std::size_t>(h * group + r) * dim + d];
+                    }
+                    return pooled / static_cast<float>(group);
+                }();
+            for (int c = 0; c < block_tokens; ++c) {
+                keys[(static_cast<std::size_t>(h) * dim + d) * total_columns + planted * block_tokens +
+                     c] = value;
+            }
+        }
+    }
+    round_to_bf16(keys);
+
+    DeviceBuffer device_sums(static_cast<std::size_t>(dim) * kv_heads * blocks * sizeof(float));
+    std::vector<float> zero_sums(static_cast<std::size_t>(dim) * kv_heads * blocks, 0.0F);
+    device_sums.copy_from_host(zero_sums.data(), zero_sums.size() * sizeof(float));
+    DeviceBuffer device_counts(static_cast<std::size_t>(blocks) * sizeof(std::int32_t));
+    std::vector<std::int32_t> zero_counts(static_cast<std::size_t>(blocks), 0);
+    device_counts.copy_from_host(zero_counts.data(), zero_counts.size() * sizeof(std::int32_t));
+
+    Tensor sums_tensor(device_sums.p, DType::FP32, {dim, kv_heads, blocks});
+    Tensor counts_tensor(device_counts.p, DType::I32, {blocks});
+
+    for (int first = 0; first < total_columns; first += chunk) {
+        const int columns = std::min(chunk, total_columns - first);
+        std::vector<float> slice(static_cast<std::size_t>(dim) * kv_heads * columns);
+        for (int h = 0; h < kv_heads; ++h) {
+            for (int d = 0; d < dim; ++d) {
+                for (int c = 0; c < columns; ++c) {
+                    slice[(static_cast<std::size_t>(h) * dim + d) * columns + c] =
+                        keys[(static_cast<std::size_t>(h) * dim + d) * total_columns + first + c];
+                }
+            }
+        }
+        DeviceBuffer device_slice = to_device_bf16(slice);
+        Tensor slice_tensor(device_slice.p, DType::BF16, {dim, kv_heads, columns});
+        ops::kv_block_accumulate(slice_tensor, block_tokens, first, sums_tensor, counts_tensor,
+                                 nullptr);
+    }
+
+    DeviceBuffer device_means(static_cast<std::size_t>(dim) * kv_heads * blocks * sizeof(float));
+    Tensor means_tensor(device_means.p, DType::FP32, {dim, kv_heads, blocks});
+    ops::kv_block_finalize(sums_tensor, counts_tensor, means_tensor, nullptr);
+
+    DeviceBuffer device_query = to_device_bf16(query_vec);
+    DeviceBuffer device_scores(static_cast<std::size_t>(blocks) * sizeof(float));
+    Tensor query_tensor(device_query.p, DType::BF16, {dim, q_heads});
+    Tensor scores_tensor(device_scores.p, DType::FP32, {blocks});
+    ops::kv_block_scores(query_tensor, means_tensor, scores_tensor, nullptr);
+    cuda_synchronize();
+
+    const std::vector<double> scores = from_device_f32(device_scores, blocks);
+    int best = 0;
+    for (int b = 1; b < blocks; ++b) {
+        if (scores[static_cast<std::size_t>(b)] > scores[static_cast<std::size_t>(best)]) { best = b; }
+    }
+    const std::string label = "kv_block_pool recall chain D=" + std::to_string(dim) + " H=" +
+                              std::to_string(kv_heads) + " blocks=" + std::to_string(blocks) +
+                              " chunk=" + std::to_string(chunk);
+    if (best != planted) {
+        std::cout << "FAIL: " << label << "\n  planted block " << planted << " scored "
+                  << scores[static_cast<std::size_t>(planted)] << " but block " << best << " scored "
+                  << scores[static_cast<std::size_t>(best)] << " (highest)\n";
+        return 1;
+    }
+    const double planted_score = scores[static_cast<std::size_t>(planted)];
+    if (std::fabs(planted_score - 1.0) > 1e-3) {
+        std::cout << "FAIL: " << label << "\n  planted block score " << planted_score
+                  << " should be ~1\n";
+        return 1;
+    }
+    return 0;
+}
+
 } // namespace
 
 int main() {
@@ -214,6 +309,9 @@ int main() {
     failures += accumulate_case(256, 4, 128, 1024, 256);
     failures += accumulate_case(8, 2, 4, 9, 3);
     failures += accumulate_case(8, 2, 4, 12, 5);
+    // The three ops composed the way prefill will call them: streamed keys, block means, cosine.
+    failures += recall_chain_case(64, 4, 8, 128, 8, 256);
+    failures += recall_chain_case(256, 4, 24, 128, 16, 256);
 
     if (failures == 0) { std::cout << "kv_block_pool: all checks passed\n"; }
     return failures == 0 ? 0 : 1;

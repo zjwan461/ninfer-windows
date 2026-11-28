@@ -161,6 +161,8 @@ ordinary_host_ingress->rope_positions[row]  = checked_i32(frontier, ...) + seque
 
 调用点不变：请求边界、continuation 发布之后（`src/models/qwen3_5/program/prefill.cpp:646` 的 `publish_continuation` 门），页序来自 `build_kv_view`、块集合来自 `select_kv_blocks`。记账同一处：`sequence.rope_delta += dropped_tokens`，`execution_frontier = visible_tokens`。
 
+*（2026-11-28 补记：`prepare_compacted_fork` / 显式页序已经落地，`commit_prefix_fork` 现在按页序走同一套 retain/protect/publish/active-reference 代码；见 `tests/models/qwen3_5/test_context_store.cpp` 的 compacted-view 一节，覆盖顺序、pin 集合、引用计数与"丢掉的页随源地址释放回池"。还差的不是存储层，而是采样侧：prefill 期间按块捕获 Mean-K、用最后一条用户消息打分、把选择结果接到这个调用点上。）*
+
 **7.4 动之前必须确认的三件事。**
 
 1. `committed_frontier` / `checkpoint_frontier` 是否必须以原始 token 计数表达（checkpoint 复用与 slot 文件都依赖它）；

@@ -253,6 +253,12 @@ void ProgramImpl::report_recall_boundary(SequenceState& sequence) {
                      committed, blocks, decision.boundary.execution_frontier,
                      decision.boundary.dropped_tokens, decision.selected_blocks.size(),
                      decision.boundary.rope_delta);
+        // What the swap would do to the sequence: the cache shrinks, the timeline does not.
+        const core::SequenceViewUpdate update =
+            core::plan_sequence_view(history_tokens, decision.boundary);
+        std::fprintf(stderr,
+                     "kv recall: sequence view %d tokens, rope delta %d, next sample %d\n",
+                     update.visible_tokens, update.rope_delta, update.next_sample_position);
     } catch (const std::exception& error) {
         std::fprintf(stderr, "kv recall: boundary at %d tokens was refused: %s\n", committed,
                      error.what());

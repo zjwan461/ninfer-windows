@@ -133,7 +133,41 @@ WorkspacePlan plan_workspace(const WorkspaceBudget&, span<const KvBlock> residen
 | 与现有上下文缓存/StateImage 的所有权冲突 | 未验证 | 第 2 步先做纯存储视图，不接管调度；第 4 步再接 |
 | 工程量 | 参考实现 397 文件 / +32k 行；本计划只取机制 | 主机层与页表已存在，视图不需要新 kernel，剩余主要是索引与策略 |
 
-## 7. 不在本计划内的做法
+## 7. 接线规格（读码得出，尚未实施）
+
+这一节记录把视图接进主线的精确位置，全部来自读码，未改一行代码。三处关键事实：
+
+**7.1 视图在引擎里已经存在，只是成员表固定为 0..frontier-1。**
+注意力读的是 `KVAddressSpaceStore` 的 `membership(address, page)`，`page < address.page_count`，由 `publish_membership`（`src/models/qwen3_5/program/storage/kv_store.h:1846`）按顺序发布成执行表。所谓"压实视图"就是**换一份 membership、把 page_count 变小**——不需要新 kernel，也不需要新表格式。地址结构体在 `kv_store.h:1739`（`page_count / committed_frontier / checkpoint_frontier / reservation / row`）。
+
+**7.2 两个位置已经在 decode 入口分开了，而且只有一个标量偏移。**
+`src/models/qwen3_5/program/decode.cpp:325-328`：
+
+```cpp
+ordinary_host_ingress->cache_positions[row] = checked_i32(frontier, ...);          // 执行空间里的下标
+ordinary_host_ingress->rope_positions[row]  = checked_i32(frontier, ...) + sequence.rope_delta;  // 旋转相位
+```
+
+**这是整条路上最省力的一点**：被丢掉的历史全部在 frontier 之后不会回来，所以新 token 的原始位置恒等于 `压实后 frontier + 丢掉的总 token 数`——一个标量。也就是说现有的 `rope_delta` 足够表达压实视图，**不需要逐 token 位置张量，也不需要 re-RoPE**；cache 里的 K 当初写入时的相位原样保留，读回来照旧正确。这与第 10 节实测"按原始位置旋转 + 按压实位置限范围"的结论是同一条。
+
+**7.3 需要新增的方法与调用点。**
+
+- `KVAddressSpaceStore::republish_compacted(KVAddressSpaceHandle, std::span<const LogicalKVPageHandle> ordered)`，放在 `publish_membership` 旁边，照抄前缀 fork 的发布顺序（`kv_store.h:1162-1195`）：
+  1. 校验每个 logical page 有效、`device_resident` 为真、`can_retain_reference(logical, false)` 为真；
+  2. 先把 physical 顺序 `tables_->publish(row, 0, scratch)` 发出去；
+  3. 对每个页 `retain_reference(logical,false)` + `protect_coverage(logical, kPagedKVPageSize)`（`kv_store.h:533`、`:568`）；
+  4. 释放旧 membership 中不再出现的页的 active reference（`kv_store.h:525`），新 membership 逐页 `retain_active_reference`（`:516`）；
+  5. 置 `page_count = ordered.size()`，`active` 保持不变。
+- 调用点：请求边界、continuation 发布之后（`src/models/qwen3_5/program/prefill.cpp:646` 的 `publish_continuation` 门），选择结果来自本次 prefill 各块的分数（`select_kv_blocks`）与页序（`build_kv_view`）。
+- 记账：同一处 `sequence.rope_delta += dropped_tokens`，`execution_frontier = visible_tokens`。
+
+**7.4 动之前必须确认的三件事。**
+
+1. `committed_frontier` / `checkpoint_frontier` 是否必须以原始 token 计数表达（checkpoint 复用与 slot 文件都依赖它）；
+2. 若该模型启用了 log-scaling（位置相关的长上下文缩放），`rope_positions` 必须取原始位置，否则缩放因子错档；
+3. 页的引用/覆盖顺序错了会变成 GPU 上的 use-after-free——发布必须在 retain 之前还是之后，按 fork 路径的既有顺序，不要自创。
+
+## 8. 不在本计划内的做法
 
 - 不移植参考实现的存储格式与 397 文件补丁树本体（那是另一条血缘的引擎）。
 - 不引入 re-RoPE 路径：本仓库的 RoPE 位置与 cache 位置本来就是两个张量，压实视图只需要正确的相位与正确的范围，不需要重算 K。

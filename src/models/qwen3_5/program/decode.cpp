@@ -203,8 +203,12 @@ void ProgramImpl::report_recall_boundary(SequenceState& sequence) {
     // survives only because sink or recent always covers it.
     const std::int32_t committed = blocks * block_tokens;
     static const bool apply_enabled = std::getenv("NINFER_KV_RECALL_APPLY") != nullptr;
-    const std::int32_t history_tokens =
+    // The address a compacted view publishes ends on a complete page, so the request's
+    // live tail page — the one still being written — never enters the kept set. It holds
+    // at most kPageTokens - 1 columns and is re-filled immediately after the swap.
+    const std::int32_t live_tokens =
         std::max(committed, static_cast<std::int32_t>(sequence.text_kv_valid));
+    const std::int32_t history_tokens = live_tokens - (live_tokens % kPageTokens);
     const std::int32_t pages =
         (history_tokens + kPageTokens - 1) / kPageTokens;
     std::vector<std::int32_t> page_order(static_cast<std::size_t>(pages));

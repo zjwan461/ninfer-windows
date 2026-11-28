@@ -1149,8 +1149,19 @@ public:
                 throw std::invalid_argument("KV compacted-view page order is not strictly increasing");
             }
             const LogicalKVPageHandle logical = membership(source, page);
+            // A kept page only has to contribute the columns the view actually executes.
+            // The page that ends the source history is the one a live request is still
+            // appending to, so it is generally short; the pages before it are complete.
             const bool tail_page = tail_columns != 0 && index + 1 == ordered_source_pages.size();
-            const std::uint32_t needed = tail_page ? tail_columns : page_size;
+            const bool live_tail = page + 1 == pages_for_tokens(source.committed_frontier);
+            std::uint32_t needed = page_size;
+            if (tail_page) {
+                needed = tail_columns;
+            }
+            if (live_tail) {
+                const std::uint32_t written = source.committed_frontier % page_size;
+                needed = std::min(needed, written == 0 ? page_size : written);
+            }
             if (!pages_->device_resident(logical) || pages_->committed_columns(logical) < needed ||
                 !pages_->can_pin_source(logical) || !pages_->can_retain_reference(logical, false)) {
                 throw std::logic_error("KV compacted-view source page is not stable");
@@ -1274,7 +1285,12 @@ public:
                 (fork.compacted() && fork.tail_columns_ != 0 && page + 1 == fork.full_pages_)
                     ? fork.tail_columns_
                     : static_cast<std::uint32_t>(kPagedKVPageSize);
-            pages_->protect_coverage(logical, columns);
+            // A compacted view keeps pages a live request may still be filling, so the
+            // columns it protects are the ones that page actually has, never more.
+            const std::uint32_t covered = fork.compacted()
+                                              ? std::min(columns, pages_->committed_columns(logical))
+                                              : columns;
+            pages_->protect_coverage(logical, covered);
             membership(destination, page) = logical;
         }
         if (fork.tail_destination_) {

@@ -316,6 +316,21 @@ kv recall: applied view 4014 tokens, rope delta 10368, next sample 14382, addres
 | 196,608 | 无（不触发换装） | 100 % | 逐字相同，4/4 |
 | 131,072 | 130,956 | 67.2 % | **不同**：`GAMMA` 被写成 `5803-CYAN`，其余三码正确 |
 
+**197k 历史、67.3 % 留存首次真正换装并通过**（三处修复之后）：
+
+| 预算 | 视图 | 留存率 | 结果 |
+|---|---|---|---|
+| 131,072 | 131,072 | 67.3 % | 逐字相同，标记 4/4（`applied view 131072 ..., rope delta 63744`） |
+
+此前在同一预算上出现的失败，是视图**没有真正落地**造成的：先是 `KV compacted-view source page is not
+stable`（活尾页列数不足被判不稳定），后是 `logical KV protection exceeds committed coverage`
+（保留页按满页 64 列保护，而它只提交了更少）。三处修复：
+1. `prepare_compacted_fork` 的列数要求按“该页在视图里贡献多少列”计算，活尾页取 `min(needed, 已写列数)`；
+2. 压缩前沿对齐到页边界（`history_tokens -= history_tokens % 64`），正在写的活尾页不进入保留集合；
+3. `commit_prefix_fork` 的 `protect_coverage` 对压缩视图取 `min(columns, committed_columns)`。
+**教训**：这类失败会被闸口误判成“保真度不足”，因为它只看到答案不同；所以闸口必须同时检查换装是否真的发生
+（`applied view` 行），否则拒绝换装的运行会被当成一次成功。
+
 闸口现在支持 `--depths`（按深度埋 1-8 个标记），因此同一保留率可以换一个埋点布局再问一次。
 用 `--depths 0.1,0.3,0.5,0.7,0.9` 在同一个 131,072 预算上重跑，结果**逐字相同（PASS）**：
 

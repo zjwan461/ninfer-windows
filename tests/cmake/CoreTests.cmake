@@ -39,6 +39,10 @@ ninfer_add_test(ninfer_kv_view_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_kv_view.cpp"
   LIBRARIES ninfer_core)
 
+ninfer_add_test(ninfer_kv_recall_index_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_kv_recall_index.cpp"
+  LIBRARIES ninfer_core)
+
 ninfer_add_test(ninfer_kv_recall_plan_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_kv_recall_plan.cpp"
   LIBRARIES ninfer_core)

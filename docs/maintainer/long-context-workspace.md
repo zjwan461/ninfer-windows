@@ -479,3 +479,140 @@ RTX 4080 SUPER, Qwen3.8-27B int8 artifact, `NINFER_KV_RECALL=1 NINFER_KV_RECALL_
 - **What this is worth.** 200k of history at 65 % retention answered identically to the full view
   while fitting in half the cache, which is the point of the level: the same card can hold a
   request it could not hold natively, at a retention ratio the operator chooses.
+
+## 12. Research record: what was built, measured, and left open
+
+This section closes the KVMem line of work at commit `25659b28` on
+`docs/performance-levers`. Everything below was measured on an RTX 4080 SUPER (32 GB, sm_89) with
+the Qwen3.8-27B int8 artifact (`E:\models\qwen3_8_27b_a8.ninfer`), `--kv-dtype int8
+--no-thinking`, greedy decoding.
+
+### 12.1 What is in the tree
+
+| Layer | Module | State |
+|---|---|---|
+| Planning | `src/core/kv_workspace.{h,cpp}` — `select_kv_blocks`, `plan_workspace` | tested |
+| View | `src/core/kv_view.{h,cpp}` — `build_kv_view`, `plan_view_boundary`, `plan_sequence_view` | tested |
+| Decision | `src/core/kv_recall_decision.{h,cpp}` — `plan_recall` | tested |
+| Index | `src/core/kv_recall_index.{h,cpp}`, `kv_recall_set.{h,cpp}` | tested |
+| Ops | `include/ninfer/ops/kv_block_pool.h` — mean keys, scores, accumulate, finalize | FP64-oracle tested |
+| Capture | `text.cpp attn_mix` before `text_rope`; `kv_recall_cursor` device accumulator | live, ~15 % prefill cost |
+| Publish | `prepare_compacted_fork`, `commit_prefix_fork`, `adopt_writer`, partial tail page | store test |
+| Swap | `ProgramImpl::apply_recall_view` behind `NINFER_KV_RECALL_APPLY` | measured |
+
+Two environment switches gate everything: `NINFER_KV_RECALL` (capture + boundary decision) and
+`NINFER_KV_RECALL_APPLY` (the address swap). Both default to off, so the shipped path is unchanged.
+`NINFER_KV_RECALL_BUDGET` sets the token budget; `NINFER_KV_RECALL_TRACE` and
+`NINFER_KV_RECALL_TRACE_BLOCKS` print the kept block ids and a block's score/rank.
+
+### 12.2 Measured results
+
+- **Capture keeps up.** `captured 200832 columns over 16 layers -> 1569 complete blocks of 128`
+  after a 200,897-token prompt. The 16 full-attention layers are dense; GDN layers never appear.
+- **A wide budget is the identity.** With a budget wider than the history the boundary reports
+  `dropped 0` and the answer is unchanged; the swap is skipped in that case.
+- **The swap works and is faithful at high retention.** 14,382-token prompt with budget 4096:
+  `applied view 4014 tokens, rope delta 10368, next sample 14382`, answer identical to the full
+  view. 200k-token prompt with budget 131,072 (67.3 % retention): identical answer on two different
+  marker layouts (5/35/65/95 % and 10/30/50/70/90 %).
+- **Low retention fails by selection, not by dilution.** Budget 98,304 (50.5 %) and 49,152 (25.2 %)
+  both answer a mid-history marker with an invented value of the same shape. The trace shows why:
+  at 49,152 the kept set is 384 blocks spread over 0..1521 and the marker's block is not among them.
+
+  | block | role | score | rank of 1522 | kept |
+  |---|---|---:|---:|---|
+  | 990 | marker at 65 % depth | −0.056 | 482 | no |
+  | 0 | sink | 0.330 | 0 | yes |
+  | 1521 | recent tail | 0.078 | 40 | yes |
+  | 700 | arbitrary mid-history | −0.068 | 544 | no |
+
+- **The ranking is flat in the middle of the history.** Sink and recent score positive, everything
+  between them is a near-zero negative, so an arbitrarily placed fact does not rise above its
+  neighbours.
+- **That is not a sampling or geometry artefact.** Halving the block to 64 tokens moved the failure
+  from GAMMA to ALPHA (one block entered the kept set, another left it) without sharpening the
+  signal; narrowing the query pool from 512 to 8 columns left the marker's score unchanged to six
+  decimals.
+
+### 12.3 Why it fails, and what would fix it
+
+Mean-K cosine, averaged over 16 layers and 4 KV heads, has no discriminative power for an
+arbitrary single-shot fact lookup. The operator is correct — it matches an FP64 oracle — but the
+signal assumes what the KVMem paper assumes: an agent workspace where the query and the text to be
+recalled share vocabulary and structure (a follow-up question about code that is already in the
+transcript). A needle planted in unrelated text does not satisfy that assumption.
+
+The measured consequence is that a compacted view is trustworthy when it is a **contiguous tail**
+(drop the head, keep the rest), and untrustworthy when it has to punch holes through the middle of
+the history. The 67 % pass is the contiguous-tail case; the 50 % and 25 % failures are hole-punching.
+
+Better interior selection needs a different retrieval signal, not a scoring tweak. The two
+candidates the evidence points at are a multi-query union (score each block against every turn's
+question and keep the max, so a fact survives when any turn pointed at it) and a
+retention-by-attention signal (rank blocks by the attention mass they actually received rather than
+by a query-to-key cosine). The multi-query union was drafted and reverted unverified when this line
+of work stopped; it is the cheaper of the two and is the recommended next step.
+
+### 12.4 What this does not deliver
+
+- **It does not make the context longer.** The position table stops at 262,144. Neither the KV
+  window nor the swap extends it; both keep original positions by construction. Reaching 1M needs
+  YaRN (rope_scaling with factor 4, `original_max_position_embeddings` 262144), which this engine
+  does not implement at all.
+- **It does not make a 16 GB card hold Qwen3.8-27B.** The int8 weights alone are 15.9 GiB and 256k
+  of int8 KV is another 9.35 GB. A 16 GB card would need the 10.9 GiB IQ3_S weights, which this
+  tree refuses to load (`unknown tensor layout: gguf_blocks_v1`), plus window-only KV residency.
+- **It does not implement Level 2.** Host-tier prefixes with text recall was judged the weakest of
+  the three levels and was not built; the host-tier primitives (`HostKVArena`, `HostKVExtentStore`)
+  exist but carry no scheduler.
+- **The low-retention path is not usable as shipped.** `NINFER_KV_RECALL_APPLY` stays off by
+  default precisely because interior selection is not yet trustworthy.
+
+### 12.5 What is worth having
+
+Two things, in this order:
+
+1. **`--kv-dtype int8` is the inexpensive capacity win.** It moves the card from 208,512 (bf16,
+   VRAM-bound) to the full 262,144 position capacity, uses 9.35 GB instead of 12.7 GiB, and is
+   faster at the same time (228k prompt: prefill 1.37k → 1.68k tok/s, decode 22.6 → 26.8 tok/s).
+   No code change; it is an existing engine switch whose number this work measured.
+2. **The compacted view is a residency technique, not a length technique.** Its payoff lands on a
+   card too small for full residency, or on a model whose position table goes beyond 262,144. On
+   this 32 GB card, with int8 KV that already fits, it saves VRAM and bounds decode cost (34 tok/s
+   at 637k in the reference engine), but it does not unlock anything the card could not already do.
+
+### 12.6 Reproducing the measurements
+
+```powershell
+# build (RTX 4080 SUPER, sm_89, 80 SM wave geometry)
+cmake -S . -B build-4080s -G Ninja -DCMAKE_BUILD_TYPE=Release ^
+  -DCMAKE_CUDA_ARCHITECTURES=89 -DNINFER_TARGET_SM_COUNT=80 -DBUILD_TESTING=ON
+cmake --build build-4080s --target ninfer-serve
+
+# the acceptance gate: baseline and candidate in sequence, greedy, byte comparison,
+# prints the retention ratio and fails when the swap was refused
+python tools\bench\run_kv_recall_gate.py ^
+  --exe build-4080s\apps\ninfer-serve.exe ^
+  --artifact E:\models\qwen3_8_27b_a8.ninfer\qwen3_8_27b_a8.ninfer ^
+  --corpus eval\corpora\perplexity-1m\data\infer --chars 700000 ^
+  --max-context 262144 --kv-dtype int8 --budget 131072
+```
+
+The gate sets `NINFER_KV_RECALL=1 NINFER_KV_RECALL_APPLY=1 NINFER_KV_RECALL_BUDGET=<budget>` for the
+candidate run and leaves them unset for the baseline, kills the first server before starting the
+second (a 262k context fills most of a 32 GB card), and reads `applied` or `refused` out of the
+candidate's log so a refused swap cannot look like a pass.
+
+### 12.7 Traps worth remembering
+
+- **Editing a header alone does not rebuild its users here.** `kv_store.h` is not in the target's
+  depfile, so ninja reports `no work to do` and a stale binary answers. Touch the participating
+  `.cpp` files before rebuilding.
+- **Probes must be inserted as their own line with the file's own line ending.** A script that split
+  on `\r\n` and inserted `\n`-terminated lines glued code onto probe lines, and deleting "lines
+  containing kvdbg" deleted real statements.
+- **A refused swap looks exactly like a pass.** The store refuses to publish a view that would drop
+  a live page; the answer then matches because the full view never moved. Three such defects were
+  found only after the gate started reading `refused` out of the log.
+- **A crashed test with no output is usually a locked exe or a stale object,** not a logic error.
+

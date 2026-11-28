@@ -38,7 +38,14 @@ import time
 import urllib.error
 import urllib.request
 
-MARKER = re.compile(r"\b(ALPHA|BETA|GAMMA|DELTA)\s*=\s*([0-9]{4}-[A-Z]+)\b")
+MARKER = re.compile(r"\b([A-Z]{4,6})\s*=\s*([0-9]{4}-[A-Z]+)\b")
+
+FIXTURE = [("ALPHA", "7134-MAGENTA"), ("BETA", "2291-ORANGE"),
+           ("GAMMA", "5077-TURQUOISE"), ("DELTA", "8642-VIOLET"),
+           ("EPSILON", "2208-CRIMSON"), ("ZETA", "6165-OBSIDIAN"),
+           ("ETA", "4429-AMBER"), ("THETA", "9073-SIENNA")]
+
+DEFAULT_DEPTHS = "0.05,0.35,0.65,0.95"
 
 QUESTION = (
     "\n\nList every fact of the form NAME=CODE that appears in the document above, "
@@ -55,21 +62,18 @@ def load_corpus(directory: pathlib.Path) -> str:
     return files[0].read_text(encoding="utf-8", errors="replace")
 
 
-def build_prompt(corpus_text: str, target_chars: int) -> str:
+def build_prompt(corpus_text: str, target_chars: int, depths) -> str:
     """Repeat the corpus until it covers the request, then plant the four markers."""
     body = corpus_text.strip()
     repeats = max(1, target_chars // max(1, len(body)))
     text = (body + "\n\n") * repeats
     text = text[:target_chars]
-    planted = []
-    for index, (name, code) in enumerate(
-            [("ALPHA", "7134-MAGENTA"), ("BETA", "2291-ORANGE"),
-             ("GAMMA", "5077-TURQUOISE"), ("DELTA", "8642-VIOLET")]):
-        depth = [0.05, 0.35, 0.65, 0.95][index]
-        position = int(len(text) * depth)
-        fact = f"\n\n{name}={code} is the access code of this section.\n\n"
-        text = text[:position] + fact + text[position:]
-        planted.append(f"{name}={code}")
+    if len(depths) > len(FIXTURE):
+        raise SystemExit(f"at most {len(FIXTURE)} depths")
+    for index, depth in enumerate(depths):
+        name, code = FIXTURE[index]
+        position = max(0, min(len(text), int(len(text) * depth)))
+        text = text[:position] + f"\n\n{name}={code} is the access code.\n\n" + text[position:]
     return text
 
 
@@ -176,6 +180,8 @@ def main(argv=None) -> int:
     parser.add_argument("--corpus", type=pathlib.Path, required=True)
     parser.add_argument("--model", default="qwen3.8-27b")
     parser.add_argument("--chars", type=int, default=700000)
+    parser.add_argument("--depths", default=DEFAULT_DEPTHS,
+                        help="comma separated marker depths in (0,1)")
     parser.add_argument("--max-tokens", type=int, default=64)
     parser.add_argument("--timeout", type=float, default=1800.0)
     parser.add_argument("--max-context", type=int, default=262144)
@@ -188,8 +194,11 @@ def main(argv=None) -> int:
                         help="markers the candidate must recover; 0 means every marker the baseline recovered")
     parser.add_argument("--out", type=pathlib.Path)
     args = parser.parse_args(argv)
+    depths = [float(value) for value in args.depths.split(",") if value.strip()]
+    if not depths:
+        raise SystemExit("no depths given")
 
-    prompt = build_prompt(load_corpus(args.corpus), args.chars) + QUESTION
+    prompt = build_prompt(load_corpus(args.corpus), args.chars, depths) + QUESTION
     work = pathlib.Path(os.environ.get("TEMP", ".")) / "kv_recall_gate"
     work.mkdir(parents=True, exist_ok=True)
 

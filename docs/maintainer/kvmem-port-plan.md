@@ -198,12 +198,35 @@ ordinary_host_ingress->rope_positions[row]  = checked_i32(frontier, ...) + seque
 - 不在召回层做学习式策略；先用与参考一致的静态打分，把变量留给预算。
 ## 9. 下一步（接线，按此顺序执行）
 
-前八个模块都已落地并有测试；剩下的是把已经存在的东西接到主线上，顺序不能反：
+模块层已经全部落地并有测试：捕获接口、设备累加器、块打分、选择、视图组装、驻留计划、位置记账，以及把它们串起来的
+`core::plan_recall`。剩下的是把这条链接到主线的三个点上，顺序不能反：
 
-1. **捕获**（src/models/qwen3_5/execution/text.cpp:882）：在"	ext_rope 之前"拿到 pre-RoPE 的 kn（[head_dim, kv_head_count, T]），按段调用 ops::kv_block_accumulate（整段历史共用一份 sums/counts，只要求装得下）或 CPU 侧 core::KvRecallIndex::capture。只在启用开关时捕获，默认路径零开销。
-2. **边界打分**（src/models/qwen3_5/program/prefill.cpp:646，publish_continuation 闸口）：kv_block_finalize → kv_block_scores（查询取最后一条 user 消息，GQA 分组平均的约定见 3.4）→ core::select_kv_blocks。
-3. **组装**：core::build_kv_view 得到页序 → KVStore::prepare_compacted_fork / commit_prefix_fork 发布（已落地，c75d9d48）。
-4. **位置记账**：core::plan_view_boundary 的返回值写回序列（ope_delta、执行前沿、提交前沿）。
-5. **验收**（任一不满足即回退）：≤262,144 时窗口化与全量的 	ools/bench/run_kv_recall_fidelity.py 逐字节一致；30/50/80 万 needle 4/4；预算不足必须判失败（负对照：B=36,864 丢中段针）；关开关时短上下文 bit-identical；prefill 不回退、decode 不降超 5%。
+1. **捕获**（`src/models/qwen3_5/execution/text.cpp:882`，已接好、默认关闭）：`TextContext::set_recall_sink` 为 null 时热路径
+   没有额外工作；打开后每个标准注意力层在 `text_rope` 之前把 pre-RoPE 的 kn（`[head_dim, kv_head_count, T]`）交给
+   `KvRecallSink`，由 `KvRecallCursor` 按层累加。**待做**：在程序层按"一次前向"打开/关闭，并排除投机校验列。
+2. **边界打分**（`src/models/qwen3_5/program/prefill.cpp:646` 一带，`publish_continuation` 闸口）：`KvRecallCursor::finish` →
+   `kv_block_scores`（查询取最后一条 user 消息，GQA 分组平均的约定见 3.4）→ `core::plan_recall`。
+3. **发布压实视图**：`KvRecallDecision.view.pages` → `KVStore::prepare_compacted_fork` + `commit_prefix_fork`（已落地，
+   `c75d9d48`）。**待做**：为目标 continuation 分配新的 KV 地址空间并在提交后替换 `sequence.kv->text`。
+4. **位置记账**：`KvRecallDecision.boundary` 写回序列（`rope_delta`、执行前沿、提交前沿）。decode 已经按行读两个位置，
+   所以这里不需要改 kernel。
+5. **验收**（任一不满足即回退）：≤262,144 时窗口化与全量的 `tools/bench/run_kv_recall_fidelity.py` 逐字节一致；
+   30/50/80 万 needle 4/4；预算不足必须判失败（负对照：B=36,864 丢中段针）；关开关时短上下文 bit-identical；
+   prefill 不回退、decode 不降超 5%。
 
-第 1 步是唯一会碰热路径的改动，建议单独提交、单独验收，并先跑一遍不带开关的全量基线留档。
+第 1、3 步是唯一会碰热路径与生命周期的改动，建议各自单独提交、单独验收，并先跑一遍不带开关的全量基线留档。
+
+### 已完成（便于核对进度）
+
+| 项 | 位置 | 提交 |
+|---|---|---|
+| 规划器：紧凑工作集与驻留 delta | `src/core/kv_workspace.{h,cpp}` | `80459af6` |
+| 块打分与块均值（设备） | `src/ops/{launcher,wrapper}/kv_block_pool.*` | `9557432a`、`bbe89d24` |
+| 视图组装、选择器 | `src/core/kv_view.{h,cpp}`、`select_kv_blocks` | `bf5b6ab1`、`ce4c786a` |
+| 压实 fork 的发布路径 | `src/models/qwen3_5/program/storage/kv_store.*` | `c75d9d48` |
+| 位置记账 | `core::plan_view_boundary` | `1eb742fc` |
+| 每层召回索引 / 层容器 | `src/core/kv_recall_index.*`、`kv_recall_set.*` | `5a2189ed`、`80cb4a6a` |
+| 设备累加器（每层游标） | `src/models/qwen3_5/program/storage/kv_recall_cursor.*` | `96ff8fb1` |
+| 捕获接口与热路径钩子 | `src/core/kv_recall_sink.h`、`TextContext::set_recall_sink` | `bdd0d9f0` |
+| 一次召回点的合成决策 | `src/core/kv_recall_decision.{h,cpp}` | `9d08f766` |
+| 验收闸口 | `tools/bench/run_kv_recall_fidelity.py` | `012f2280` |

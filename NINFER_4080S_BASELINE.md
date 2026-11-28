@@ -225,7 +225,7 @@ there printed nothing during an MTP run, which is how that was established; both
 ## 8. Open items
 
 1. **Catalog residency assertion** — the runtime budget is fixed (section 6.1). What remains is
-   the static_assert in f16_gdn_gating_proj_plan.cpp, still pinned to 128 SMs: switching it
+   the static_assert in bf16_gdn_gating_proj_plan.cpp, still pinned to 128 SMs: switching it
    to kTargetSmCount fails to compile because the catalog is not resident-safe under the
    older 3-CTA-per-SM model. Either tighten the catalog or re-derive the assertion.
 2. **Draft hop** — closed as "near its floor" by section 7. Reopening it would need a kernel

@@ -383,7 +383,7 @@ work; this section only records what already exists in the tree so the plan is n
 list.
 
 - **The executed view is a plan, not a kernel.** src/core/kv_view.{h,cpp} turns a request's page
-  order plus a selected block set into the compacted page order (uild_kv_view). Pages keep their
+  order plus a selected block set into the compacted page order (build_kv_view). Pages keep their
   physical identity, so the keys already written keep the position phase they were written with.
 - **The selection is a pure function.** select_kv_blocks in src/core/kv_workspace.{h,cpp}
   chooses whole blocks under a page budget, always keeping the sink prefix and the recent tail,

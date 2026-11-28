@@ -376,3 +376,36 @@ and was selected once. Those remain to be validated in the port itself.
 `--chars 640000` and prints JSON with the decoded text; both probes run against any of the serving
 lines above.
 
+## 11. Where the port stands
+
+The port is planned in [kvmem-port-plan.md](kvmem-port-plan.md), which is the authority for the
+work; this section only records what already exists in the tree so the plan is not read as a wish
+list.
+
+- **The executed view is a plan, not a kernel.** src/core/kv_view.{h,cpp} turns a request's page
+  order plus a selected block set into the compacted page order (uild_kv_view). Pages keep their
+  physical identity, so the keys already written keep the position phase they were written with.
+- **The selection is a pure function.** select_kv_blocks in src/core/kv_workspace.{h,cpp}
+  chooses whole blocks under a page budget, always keeping the sink prefix and the recent tail,
+  and throws rather than silently shrinking a request. plan_workspace in the same header turns a
+  selection into the residency move (stage_out before stage_in, a compacted 
+emaps list, and
+  the visible token count).
+- **The index primitives are on the device.** include/ninfer/ops/kv_block_pool.h provides
+  kv_block_mean_keys (per 32-token-scale block, per layer, per KV head, the mean of the
+  position-free key) and kv_block_scores (cosine of the GQA-meaned query against those means),
+  both qualified against an independent FP64 oracle.
+- **The three compose, and the accounting is tested.** 	ests/test_kv_recall_plan.cpp runs
+  scoring, selection, assembly and residency against each other over a 637k-token workspace and
+  asserts the invariants the execution path will depend on: the budget is never exceeded, the
+  needle and the compulsory blocks are always present, the executed order has no holes, a cold turn
+  stages in exactly its selection, and a warm turn stages out only what the new selection dropped.
+- **The acceptance gate exists.** 	ools/bench/run_kv_recall_fidelity.py compares a baseline and a
+  candidate endpoint on byte-identical greedy output for two probes, and requires four markers to be
+  recovered; it is the check that needs to pass before the view is allowed to change an answer.
+
+What is deliberately still missing is the mainline step: republishing a request's membership over
+the compacted page order at the request boundary, and the 
+ope_delta bookkeeping that goes with
+it. kvmem-port-plan.md section 7 records the exact seams for that, including the reason it needs
+no per-token position tensor.

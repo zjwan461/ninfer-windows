@@ -51,6 +51,10 @@ ninfer_add_test(ninfer_kv_recall_plan_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_kv_recall_plan.cpp"
   LIBRARIES ninfer_core)
 
+ninfer_add_test(ninfer_kv_recall_decision_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_kv_recall_decision.cpp"
+  LIBRARIES ninfer_core)
+
 ninfer_add_test(ninfer_slot_spill_guard_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_slot_spill_guard.cpp"
   LIBRARIES ninfer_core)

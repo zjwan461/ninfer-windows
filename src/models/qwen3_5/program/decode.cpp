@@ -215,9 +215,12 @@ void ProgramImpl::report_recall_boundary(SequenceState& sequence) {
 
     core::KvRecallRequest request;
     request.select.block_pages  = block_pages;
-    request.select.sink_pages   = std::max(block_pages, sink_tokens / kPageTokens);
-    request.select.recent_pages = std::max(block_pages, budget.recent / kPageTokens);
-    request.select.budget_pages = std::max(block_pages, budget.tokens / kPageTokens);
+    // A budget wider than the history means "keep everything"; the selector refuses a window it
+    // cannot fill, so the request is clamped to the blocks that exist.
+    request.select.sink_pages   = std::min(pages, std::max(block_pages, sink_tokens / kPageTokens));
+    request.select.recent_pages =
+        std::min(pages, std::max(block_pages, budget.recent / kPageTokens));
+    request.select.budget_pages = std::min(pages, std::max(block_pages, budget.tokens / kPageTokens));
     request.page_tokens         = kPageTokens;
     request.committed_frontier  = committed;
     request.current_rope_delta  = sequence.rope_delta;

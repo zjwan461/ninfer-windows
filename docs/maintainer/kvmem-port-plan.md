@@ -81,7 +81,14 @@ WorkspacePlan plan_workspace(const WorkspaceBudget&, span<const KvBlock> residen
 
 ### 3.4 Mean-K 索引与打分
 
-新增 `src/ops/launcher/kv_block_score.{h,cu}`：每块、每层、每 KV head 的 K 均值（去 RoPE 后求和再平均，FP16 存、FP32 累加），以及"查询向量 × 块均值"的 softmax 打分。索引在 prefill 过程中**增量**构建（不能等 prefill 结束再扫，否则块已被搬走）。
+新增 `include/ninfer/ops/kv_block_pool.h` 与 `src/ops/{launcher,wrapper}/kv_block_pool.*`（已落地，纯数学、无引擎类型）：
+
+- `kv_block_mean_keys(keys[D,H,T] bf16, block_tokens, means[D,H,B] fp32)`：块内均值，FP32 累加、除以精确块长。入参是**旋转前**的 K，所以天然与位置无关，不需要去 RoPE 算子。
+- `kv_block_scores(query[D,Q] bf16, means[D,H,B] fp32, scores[B] fp32)`：GQA 分组内把 query head 平均成 KV head 的查询向量，与块均值做余弦相似度、再按 KV head 平均。softmax 与 top-k 留给 3.5。
+
+测试 `tests/ops/test_kv_block_pool.cpp` 用独立 FP64 oracle，覆盖 D=8/16/64/256、GQA 2/4/6 倍、含尾部不完整块、全零块（相似度定义为 0）与真实几何（head_dim 256、4 KV heads × 24 query heads）。"块均值"的存储量：16 层 × 4 heads × 256 dim × 2 B × 块数，637k tokens / 128 = 4,976 块 → 约 65 MiB。
+
+索引仍需在 prefill 过程中**增量**构建（不能等 prefill 结束再扫，否则块已被搬走），这部分属于 3.3 的接入点。
 
 内存：16 层 × 4 heads × 256 dim × 2 B × 块数；637k tokens / 128 = 4,976 块 → 约 65 MiB，可忽略。
 

@@ -77,6 +77,10 @@ WorkspacePlan plan_workspace(const WorkspaceBudget&, span<const KvBlock> residen
 
 掩码不需要新机制：可见集合就是被选中的块，压实后天然是单调前缀；sink 与 recent 通过"永远保留"实现。
 
+**已落地（第 1 步的逻辑半边）**：`src/core/kv_view.{h,cpp}` 的 `build_kv_view(pages, {block_pages, sink_pages, recent_pages}, selected_blocks)`。它只做页序决策：块按 `block_pages` 切分（尾块可短），选中块 ∪ sink 前缀 ∪ recent 尾 按时间序保留，未命中者丢弃，返回执行页序与可见页数。页保持**物理身份**不变，所以写进 cache 的 K 仍然带着写入时的相位——这正是 §10 里"不需要 re-RoPE"的代码化表述。测试 `tests/test_kv_view.cpp` 覆盖身份映射、中段淘汰补洞、sink/recent 覆盖其所在块、短尾块、选择乱序与重复、以及六类非法几何。
+
+剩下的真接线（写 `kv_table_rows`、两份位置张量、prefill 增量索引、请求边界上的工作区归属）都在 `qwen3_5/program` 的 decode/prefill 路径上，属于同一处改动。
+
 工作量因此从"一个新 kernel + 逐字节一致性验证"降为"组装器 + 表构造 + 一致性验证"。
 
 ### 3.4 Mean-K 索引与打分

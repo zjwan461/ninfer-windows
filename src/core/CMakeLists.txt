@@ -13,6 +13,7 @@ add_library(ninfer_core STATIC
   weight_view.cpp
   decode_graph.cpp
   kv_workspace.cpp
+  kv_view.cpp
 )
 ninfer_internal_includes(ninfer_core)
 ninfer_cuda_archive(ninfer_core)

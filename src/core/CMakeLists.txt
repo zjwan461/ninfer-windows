@@ -15,7 +15,7 @@ add_library(ninfer_core STATIC
   kv_workspace.cpp
   kv_view.cpp
   kv_recall_index.cpp
-    kv_recall_set.cpp
+  kv_recall_set.cpp
 )
 ninfer_internal_includes(ninfer_core)
 ninfer_cuda_archive(ninfer_core)

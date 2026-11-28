@@ -47,6 +47,10 @@ set_tests_properties(
   ninfer_qwen3_5_context_store_test
   PROPERTIES SKIP_RETURN_CODE 77)
 
+ninfer_add_test(ninfer_qwen3_5_kv_recall_cursor_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_kv_recall_cursor.cpp"
+  LIBRARIES ninfer_model_runtime ninfer_core)
+
 ninfer_add_test(ninfer_qwen3_5_prefix_real_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_engine_prefix_real.cpp"
   LIBRARIES ninfer_engine)

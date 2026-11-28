@@ -208,18 +208,27 @@ ordinary_host_ingress->rope_positions[row]  = checked_i32(frontier, ...) + seque
    **实测**：一个 7,440 token 的 prompt 打印 `kv recall: captured 7440 columns over 16 layers -> 58 complete blocks of 128`，
    之后每个续写前向（host 驱动的续 prefill）继续累加（+2/+3/+4），说明索引跟得住增长的历史。
    **未做**：`captured_columns_` 跨轮次、跨复用一直累加；一旦压缩或换会话，块编号与内容不再对应，必须在序列被压实/复用时重建。
-2. **边界打分**（`src/models/qwen3_5/program/prefill.cpp:646` 一带，`publish_continuation` 闸口）：`KvRecallCursor::finish` →
-   `kv_block_scores`（查询取最后一条 user 消息，GQA 分组平均的约定见 3.4）→ `core::plan_recall`。
-   **缺口**：查询向量目前还没有来源——`capture_layer` 只收 kn，`kv_block_scores` 需要同一层 pre-RoPE 的 qn。
-   下一步是给 `KvRecallSink` 加 `capture_query`（`text.cpp` 里紧挨 `capture_layer`，同样在 `text_rope` 之前），
-   游标保留最近 ≤512 列并按 (d, head) 求均值，再按 KV head 分组喂给打分算子。
-3. **发布压实视图**：`KvRecallDecision.view.pages` → `KVStore::prepare_compacted_fork` + `commit_prefix_fork`（已落地，
-   `c75d9d48`）。**待做**：为目标 continuation 分配新的 KV 地址空间并在提交后替换 `sequence.kv->text`。
-4. **位置记账**：`KvRecallDecision.boundary` 写回序列（`rope_delta`、执行前沿、提交前沿）。decode 已经按行读两个位置，
-   所以这里不需要改 kernel。
-5. **验收**（任一不满足即回退）：≤262,144 时窗口化与全量的 `tools/bench/run_kv_recall_fidelity.py` 逐字节一致；
-   30/50/80 万 needle 4/4；预算不足必须判失败（负对照：B=36,864 丢中段针）；关开关时短上下文 bit-identical；
-   prefill 不回退、decode 不降超 5%。
+2. **边界打分**（`src/models/qwen3_5/program/prefill.cpp` 的 `publish_continuation` 闸口之后，`report_recall_boundary`）：
+    `KvRecallCursor::finish` → `block_scores()`（每层每 KV head 的 cosine，查询取最后 ≤512 列的 GQA 分组平均）→
+    `core::plan_recall`。查询侧已接好：`KvRecallSink::capture_query` 与 `capture_layer` 同点调用，`text_rope` 之前；
+    游标按 `[head_dim, kv_heads]` 保留每层一个池化查询，`block_scores()` 是设备算子 `kv_block_scores` 的主机等价物。
+    **实测**（262,144 窗口、int8 KV、`NINFER_KV_RECALL=1`、`NINFER_KV_RECALL_BUDGET=8192`）：
+    `kv recall: boundary 16896 tokens, 132 blocks -> view 8192 tokens (dropped 8704), 64 blocks kept, rope delta 8704`。
+    这就是一次真实召回点的完整决策，且没有改动任何地址。
+ 3. **发布压实视图**：`KvRecallDecision.view.pages` → `KVStore::prepare_compacted_fork` + `commit_prefix_fork`（已落地，
+    `c75d9d48`）。**待做（本轮工作的收尾）**：为目标 continuation 分配新的 KV 地址空间并在提交后替换 `sequence.kv->text`；
+    这一步必须走 `transactions/materialization.cpp` 的事务（`root_text_address`、`activation_frontier`、 entitlement、
+    retained-tail 备份、计时器），不能就地改写活动地址——就地改写会在中途留下半个被改写的地址，且 `Address::reservation`
+    无法重规划。
+ 4. **位置记账**：`KvRecallDecision.boundary` 写回序列（`rope_delta`、执行前沿、提交前沿）。decode 已经按行读两个位置，
+    所以这里不需要改 kernel。**注意顺序**：先提交新地址，再改 `sequence.rope_delta`/`text_kv_valid`，否则中间一步的
+    位置与地址不一致。
+ 5. **验收**（任一不满足即回退）：≤262,144 时窗口化与全量的 `tools/bench/run_kv_recall_fidelity.py` 逐字节一致；
+    30/50/80 万 needle 4/4；预算不足必须判失败（负对照：B=36,864 丢中段针）；关开关时短上下文 bit-identical；
+    prefill 不回退、decode 不降超 5%。
+    **本卡的限制**：产物位置容量是 262,144，所以 300k/500k/800k 的 needle 必须先做位置扩展（RoPE 缩放或长上下文微调），
+    这与参考实现能跑 637,768 的差别只在这里——它的位置表更大。在这一步之前，本卡能验收的是"不丢块时逐字节一致"和
+    "强制丢块时仍 4/4"两件事。
 
 第 1、3 步是唯一会碰热路径与生命周期的改动，建议各自单独提交、单独验收，并先跑一遍不带开关的全量基线留档。
 
@@ -238,6 +247,8 @@ ordinary_host_ingress->rope_positions[row]  = checked_i32(frontier, ...) + seque
 | 一次召回点的合成决策 | `src/core/kv_recall_decision.{h,cpp}` | `9d08f766` |
 | 验收闸口 | `tools/bench/run_kv_recall_fidelity.py` | `012f2280` |
 | 主线捕获接线（默认关闭） | `program_impl`, `prefill`, `context.h` | `5c870d6e` |
+| 边界查询捕获（GQA 池化、512 列上限） | `kv_recall_sink.h`、`kv_recall_cursor.*`、`text.cpp` | `19a796e9` |
+| 块打分的主机形态与实测边界 | `KvRecallCursor::block_scores`、`report_recall_boundary` | `5e380bdd`、`8718f236` |
 
 ### 增量构建的坑（`5c870d6e` 期间）
 

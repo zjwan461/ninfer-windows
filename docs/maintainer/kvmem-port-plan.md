@@ -167,6 +167,25 @@ ordinary_host_ingress->rope_positions[row]  = checked_i32(frontier, ...) + seque
 2. 若该模型启用了 log-scaling（位置相关的长上下文缩放），`rope_positions` 必须取原始位置，否则缩放因子错档；
 3. 页的引用/覆盖顺序错了会变成 GPU 上的 use-after-free——发布必须在 retain 之前还是之后，按 fork 路径的既有顺序，不要自创。
 
+**7.5 引用计数的置换顺序，以及第一版不回收什么。**
+
+成员表是每个地址定长的单元格数组（`Address` 在 `kv_store.h:1739`，含 `page_count / committed_frontier / checkpoint_frontier / reservation / row / occupied / active`），引用计数是**每个物理页**的（`retain_reference(handle, writer)`、`release_reference(handle)`）。所以压实就是一次置换，安全的顺序只有一种：
+
+1. 先把所有**新进入**视图的页 `retain_reference(page, false)` 全部做完；
+2. 再对所有**离开**视图的页 `release_reference(page)`；
+3. 留在视图里的页一个都不碰。
+
+先 retain 后 release、绝不交错，是为了不出现"某页计数掉到 0、但新成员表还指着它"的窗口；按页逐个"先 release 旧的再 retain 新的"就会踩这个窗口。发布顺序沿用前缀 fork：先 `tables_->publish(row, 0, scratch)` 把设备端顺序换掉，再动主机侧计数。
+
+**第一版刻意不回收的东西**：`Address::reservation` 仍然描述这个地址最初的页分配，被丢掉的页会继续占着设备驻留，直到单独一步重排 reservation（或对它们走 `dematerialize(handle, reservation)`）。也就是说第一版买到的是**正确的视图**，不是**省下的显存**——容量收益要等第二步。这与第 6 节风险表里"第 2 步先做纯存储视图，不接管调度"是同一条决定。
+
+**实现时要一并成立的检查**：
+
+- 压实后 `missing_device_pages(address)` 必须为 0，否则 attention 会读到没驻留的行；
+- 若某个被丢掉的页仍是某个前缀 fork 的源（`source_pins(page) != 0`），`release_reference` 必须拒绝而不是把它释放掉；
+- 压实改变了 `checkpoint_frontier` 的覆盖，`rebuild_checkpoint_protection()` 必须跟着重跑；
+- 只重排、不丢弃的压实（选择集等于全体）必须等价于空操作，这是最容易被写错又最容易测的边界。
+
 ## 8. 不在本计划内的做法
 
 - 不移植参考实现的存储格式与 397 文件补丁树本体（那是另一条血缘的引擎）。

@@ -202,6 +202,7 @@ void ProgramImpl::report_recall_boundary(SequenceState& sequence) {
     // is computed on the sequence's frontier and the tail block is scored as unselectable: it
     // survives only because sink or recent always covers it.
     const std::int32_t committed = blocks * block_tokens;
+    static const bool apply_enabled = std::getenv("NINFER_KV_RECALL_APPLY") != nullptr;
     const std::int32_t history_tokens =
         std::max(committed, static_cast<std::int32_t>(sequence.text_kv_valid));
     const std::int32_t pages =
@@ -259,10 +260,68 @@ void ProgramImpl::report_recall_boundary(SequenceState& sequence) {
         std::fprintf(stderr,
                      "kv recall: sequence view %d tokens, rope delta %d, next sample %d\n",
                      update.visible_tokens, update.rope_delta, update.next_sample_position);
+        if (apply_enabled && decision.boundary.dropped_tokens != 0) {
+            apply_recall_view(sequence, &decision, history_tokens);
+        }
     } catch (const std::exception& error) {
         std::fprintf(stderr, "kv recall: boundary at %d tokens was refused: %s\n", committed,
                      error.what());
     }
+}
+
+void ProgramImpl::apply_recall_view(SequenceState& sequence, const void* raw,
+                                   std::int32_t history_tokens) {
+    const auto& decision = *static_cast<const core::KvRecallDecision*>(raw);
+    if (!sequence.kv) { throw std::logic_error("recall view needs a sequence KV bundle"); }
+    const KVAddressSpaceHandle source = sequence.kv->text;
+    const std::int32_t row            = text_kv_addresses->bound_row(source);
+    if (row < 0) { throw std::logic_error("recall view needs a bound text address"); }
+    const std::uint32_t entitlement = text_kv_addresses->entitlement(source);
+    std::vector<std::uint32_t> pages(decision.view.pages.begin(), decision.view.pages.end());
+    const auto visible = static_cast<std::uint32_t>(decision.boundary.execution_frontier);
+    cudaStream_t stream = nullptr;
+
+    // The source must be inactive to be forked from: a live row would let the next step write
+    // into a page that is about to be dropped.
+    text_kv_addresses->deactivate(source);
+    const auto destination = text_kv_addresses->create_inactive();
+    if (!destination) {
+        text_kv_addresses->activate(source, entitlement, row, stream);
+        throw std::runtime_error("recall view has no destination address");
+    }
+    // The compacted address is entitled to exactly the pages it keeps: the dropped pages are
+    // still held by the source until it is released, so reserving room for growth here would ask
+    // the pool for memory it does not have yet. Growth is restored after the release, below.
+    const auto required = static_cast<std::uint32_t>(pages.size());
+    try {
+        std::fprintf(stderr, "kv recall: applying pages %zu visible %u row %d\n", pages.size(),
+                     visible, row);
+        auto fork = text_kv_addresses->prepare_compacted_fork(source, *destination, pages, visible,
+                                                              required, row);
+        text_kv_addresses->commit_prefix_fork(std::move(fork), stream);
+    } catch (...) {
+        text_kv_addresses->release(*destination);
+        text_kv_addresses->activate(source, entitlement, row, stream);
+        throw;
+    }
+    text_kv_addresses->release(source);
+    sequence.kv->text = *destination;
+    // The source's pages are free now: give the compacted address back the growth room it had,
+    // so the next decode steps can append without re-planning.
+    try {
+        text_kv_addresses->resize_entitlement(*destination, entitlement);
+    } catch (const std::exception& error) {
+        std::fprintf(stderr, "kv recall: growth entitlement stays at %u (%s)\n", required,
+                     error.what());
+    }
+
+    const core::SequenceViewUpdate update = core::plan_sequence_view(history_tokens, decision.boundary);
+    sequence.rope_delta    = update.rope_delta;
+    sequence.text_kv_valid = static_cast<std::uint32_t>(update.visible_tokens);
+    if (recall_cursor) { recall_cursor->reset(); }
+    std::fprintf(stderr,
+                 "kv recall: applied view %d tokens, rope delta %d, next sample %d, address row %d\n",
+                 update.visible_tokens, update.rope_delta, update.next_sample_position, row);
 }
 
 void ProgramImpl::copy_round_token() {

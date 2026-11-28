@@ -1195,6 +1195,10 @@ private:
     // and how many tokens the executed view would carry. Read-only; publishing the compacted address
     // is a separate step.
     void report_recall_boundary(SequenceState& sequence);
+    // Replaces the sequence's text KV address with the compacted view the boundary planned,
+    // and folds the dropped prefix into `rope_delta` so the timeline does not move. Restores the
+    // source address on any failure. Only called when NINFER_KV_RECALL_APPLY is set.
+    void apply_recall_view(SequenceState& sequence, const void* decision, std::int32_t history_tokens);
     void copy_round_token();
     void
     commit_generated_prefix_identity(SequenceState& sequence, std::uint32_t base_ledger_frontier,

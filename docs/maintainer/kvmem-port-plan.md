@@ -276,6 +276,27 @@ store 测试里加的就是"整页 + 尾页"的组合：源 232 token（最后�
 两者都要求把“缓存前沿”从 ledger 长度里分离出来存储（现在只有 `text_kv_valid` 一个字段，它在这条路径上会被覆盖）。
 在那之前，`NINFER_KV_RECALL_APPLY` 必须保持默认关闭。
 
+**已解决（`6264a8e5`）**：不再就地截断，而是把两个坐标分开——缓存槽取 `sequence.text_kv_valid`，查询相位再加 `sequence.rope_delta`；`trim_sequence_kv` 在视图存在时只把缓存收到视图自身长度，ledger 照常按时间线裁剪；决策钩子挪到 prompt 的 ledger 与缓存提交之后，避免 `text_kv_valid = prompt_tokens` 把视图长度覆盖回去。详见 §7.11。
+
+### 7.11 换装落地：三个“同一个数字被当成两个坐标”的地方（`6264a8e5`）
+
+换装本身在 `28438a12` 就提交成功（源地址 deactivate → 压实 fork → commit → 指向新地址 → 释放源），但下一步解码连撞三处，都源于同一件事：压缩之后“缓存里的 token 数”不再等于“序列走到的位置”。
+
+1. **写权限**：保留页在源地址释放前与源共享，任何页都不能持有 writer 引用（只有 `activate` 会在独占时授予）。视图是 `commit_prefix_fork` 而不是 `activate` 发布的，所以换装后必须 `adopt_writer`：对新地址里“只剩自己一个引用”的页补上写权限。漏了这一步，下一个 token 的 commit coverage 就报 `logical KV committed coverage is not monotonic`（探针实测 `writers=0`）。
+2. **解码入口**：`cache_positions` 必须是缓存槽（`text_kv_valid`），`rope_positions` 必须是“缓存槽 + `rope_delta`”。没有视图时两者相等，主线逐位不变；有视图时用时间线位置当缓存槽会写到视图之外。
+3. **决策时机与截断语义**：`report_recall_boundary` 现在在 prompt 的 ledger 与缓存提交之后调用；`trim_sequence_kv` 在视图存在时把缓存收到视图长度（时间线 frontier 无法命名视图内部的非连续前缀），ledger 仍按时间线裁剪。
+
+**实测**（4080S，Qwen3.8-27B int8，14,382 token prompt，预算 4096，`--max-context 32768`）：
+
+```
+kv recall: boundary 14336 tokens, 112 blocks -> view 4014 tokens (dropped 10368), 32 blocks kept, rope delta 10368
+kv recall: applied view 4014 tokens, rope delta 10368, next sample 14382, address row 0
+```
+
+换装后解码继续；同一 prompt 在开关关/开两种情况下都回答 `7134-MAGENTA, 2291-ORANGE, 5077-TUR…`——丢掉 10,368 个 token 之后，保留区（4,014 = 31 个整块 + 46 token 尾块）的回答与全量视图逐字相同。
+
+**前置条件**：视图只按保留页数拿 entitlement，增长额度要等源释放后再补；如果整卡容量刚好被历史占满（例如 `--max-context 16384` 跑 14k prompt），补额度会失败并报 `KV coverage exceeds active entitlement`。验收要在有余量的容量下跑（本轮用 32768）。
+
 ## 8. 不在本计划内的做法
 
 - 不移植参考实现的存储格式与 397 文件补丁树本体（那是另一条血缘的引擎）。
@@ -301,12 +322,12 @@ store 测试里加的就是"整页 + 尾页"的组合：源 232 token（最后�
     **实测**（262,144 窗口、int8 KV、`NINFER_KV_RECALL=1`、`NINFER_KV_RECALL_BUDGET=8192`）：
     `kv recall: boundary 16896 tokens, 132 blocks -> view 8192 tokens (dropped 8704), 64 blocks kept, rope delta 8704`。
     这就是一次真实召回点的完整决策，且没有改动任何地址。
- 3. **发布压实视图**：`KvRecallDecision.view.pages` → `KVStore::prepare_compacted_fork` + `commit_prefix_fork`（已落地，
+ 3. **发布压实视图**（已完成，见 §7.11）：`KvRecallDecision.view.pages` → `KVStore::prepare_compacted_fork` + `commit_prefix_fork`（已落地，
     `c75d9d48`）。**待做（本轮工作的收尾）**：为目标 continuation 分配新的 KV 地址空间并在提交后替换 `sequence.kv->text`；
     这一步必须走 `transactions/materialization.cpp` 的事务（`root_text_address`、`activation_frontier`、 entitlement、
     retained-tail 备份、计时器），不能就地改写活动地址——就地改写会在中途留下半个被改写的地址，且 `Address::reservation`
     无法重规划。
- 4. **位置记账**：`KvRecallDecision.boundary` 写回序列（`rope_delta`、执行前沿、提交前沿）。decode 已经按行读两个位置，
+ 4. **位置记账**（已完成，见 §7.11）：`KvRecallDecision.boundary` 写回序列（`rope_delta`、执行前沿、提交前沿）。decode 已经按行读两个位置，
     所以这里不需要改 kernel。**注意顺序**：先提交新地址，再改 `sequence.rope_delta`/`text_kv_valid`，否则中间一步的
     位置与地址不一致。
     这一步的纯函数已经落地：`core::plan_sequence_view(committed_tokens, boundary)`（`a532cfc2`）把边界换成三个数，
@@ -339,6 +360,7 @@ store 测试里加的就是"整页 + 尾页"的组合：源 232 token（最后�
 | 主线捕获接线（默认关闭） | `program_impl`, `prefill`, `context.h` | `5c870d6e` |
 | 边界查询捕获（GQA 池化、512 列上限） | `kv_recall_sink.h`、`kv_recall_cursor.*`、`text.cpp` | `19a796e9` |
 | 块打分的主机形态与实测边界 | `KvRecallCursor::block_scores`、`report_recall_boundary` | `5e380bdd`、`8718f236` |
+| 换装落地：写权限、缓存槽、截断语义 | `kv_store.h`、`decode.cpp`、`prefill.cpp`、`context.cpp` | `6264a8e5` |
 
 ### 增量构建的坑（`5c870d6e` 期间）
 

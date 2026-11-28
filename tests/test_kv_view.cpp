@@ -11,6 +11,8 @@ namespace {
 using ninfer::core::build_kv_view;
 using ninfer::core::KvView;
 using ninfer::core::KvViewSpec;
+using ninfer::core::KvViewBoundary;
+using ninfer::core::plan_view_boundary;
 
 int expect(bool condition, const char* label) {
     if (!condition) {
@@ -132,6 +134,43 @@ int invalid_case() {
 
 } // namespace
 
+int boundary_case() {
+    int failures = 0;
+
+    // A full view changes nothing: no tokens dropped, phase untouched.
+    const KvViewBoundary full = plan_view_boundary(4096, 4096, 0);
+    failures += expect(full.dropped_tokens == 0, "a full view drops nothing");
+    failures += expect(full.rope_delta == 0, "a full view leaves the phase alone");
+    failures += expect(full.execution_frontier == 4096, "a full view executes at the frontier");
+    failures += expect(full.committed_frontier == 4096, "a full view commits at the frontier");
+
+    // 262,144 tokens viewed through a 114,688-token window from scratch.
+    const KvViewBoundary dropped = plan_view_boundary(262144, 114688, 0);
+    failures += expect(dropped.dropped_tokens == 262144 - 114688,
+                       "the dropped prefix is the difference");
+    failures += expect(dropped.rope_delta == 262144 - 114688,
+                       "the dropped prefix becomes the rope delta");
+    failures += expect(dropped.execution_frontier == 114688, "the view executes at its own end");
+    failures += expect(dropped.committed_frontier == 262144,
+                       "the committed frontier keeps the true timeline");
+
+    // A second window on the same sequence accumulates, it does not reset.
+    const KvViewBoundary again = plan_view_boundary(262144, 114688, dropped.rope_delta);
+    failures += expect(again.rope_delta == 2 * (262144 - 114688),
+                       "a second view adds to the running rope delta");
+
+    // A view longer than the history, or a negative number, must not silently shift phases.
+    failures += expect_throws([] { (void)plan_view_boundary(100, 101, 0); },
+                              "a view longer than its history is rejected");
+    failures += expect_throws([] { (void)plan_view_boundary(-1, 0, 0); },
+                              "a negative frontier is rejected");
+    failures += expect_throws([] { (void)plan_view_boundary(10, -1, 0); },
+                              "negative visible tokens are rejected");
+    failures += expect_throws([] { (void)plan_view_boundary(10, 10, -1); },
+                              "a negative rope delta is rejected");
+    return failures;
+}
+
 int main() {
     int failures = 0;
     failures += identity_case();
@@ -141,6 +180,7 @@ int main() {
     failures += partial_trailing_block_case();
     failures += unsorted_selection_case();
     failures += invalid_case();
+    failures += boundary_case();
 
     if (failures == 0) { std::cout << "kv_view: all checks passed\n"; }
     return failures == 0 ? 0 : 1;

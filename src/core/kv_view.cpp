@@ -65,4 +65,24 @@ KvView build_kv_view(const std::vector<std::int32_t>& pages, const KvViewSpec& s
     return view;
 }
 
+KvViewBoundary plan_view_boundary(std::int32_t original_frontier, std::int32_t visible_tokens,
+                                  std::int32_t current_rope_delta) {
+    if (original_frontier < 0 || visible_tokens < 0) {
+        throw std::invalid_argument("kv_view: boundary positions must be nonnegative");
+    }
+    if (current_rope_delta < 0) {
+        throw std::invalid_argument("kv_view: rope delta must be nonnegative");
+    }
+    if (visible_tokens > original_frontier) {
+        throw std::invalid_argument("kv_view: a view cannot be longer than the history it views");
+    }
+
+    KvViewBoundary boundary;
+    boundary.dropped_tokens = original_frontier - visible_tokens;
+    boundary.rope_delta = current_rope_delta + boundary.dropped_tokens;
+    boundary.execution_frontier = visible_tokens;
+    boundary.committed_frontier = original_frontier;
+    return boundary;
+}
+
 } // namespace ninfer::core

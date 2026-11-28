@@ -161,7 +161,7 @@ ordinary_host_ingress->rope_positions[row]  = checked_i32(frontier, ...) + seque
 - 好处是**没有"活地址被就地改了一半"的窗口**：旧地址在新地址发布前一直自洽，失败就整体回滚，正是这条路径已经被测试过的性质。原地重发布则要自己保证成员表、引用计数、`reservation`、`checkpoint_frontier` 四者同时一致，而 `reservation` 事实上无法在活地址上重排（见 7.5）。
 - 代价是多一次地址激活/停用，但 compaction 每个请求只发生在**请求边界**，不在 decode 内循环里，这点开销看不见。
 
-调用点不变：请求边界、continuation 发布之后（`src/models/qwen3_5/program/prefill.cpp:646` 的 `publish_continuation` 门），页序来自 `build_kv_view`、块集合来自 `select_kv_blocks`。记账同一处：`sequence.rope_delta += dropped_tokens`，`execution_frontier = visible_tokens`。
+调用点不变：请求边界、continuation 发布之后（`src/models/qwen3_5/program/prefill.cpp:646` 的 `publish_continuation` 门），页序来自 `build_kv_view`、块集合来自 `select_kv_blocks`。记账同一处：`sequence.rope_delta += dropped_tokens`，`execution_frontier = visible_tokens`（两者已落为 `core::plan_view_boundary`：dropped 累加进 `rope_delta`，执行前沿取视图长度，提交前沿保留原始时间线；视图比历史长、或出现负数一律抛异常，避免相位被静默偏移）。
 
 *（2026-11-28 补记：`prepare_compacted_fork` / 显式页序已经落地，`commit_prefix_fork` 现在按页序走同一套 retain/protect/publish/active-reference 代码；见 `tests/models/qwen3_5/test_context_store.cpp` 的 compacted-view 一节，覆盖顺序、pin 集合、引用计数与"丢掉的页随源地址释放回池"。还差的不是存储层，而是采样侧：prefill 期间按块捕获 Mean-K、用最后一条用户消息打分、把选择结果接到这个调用点上。）*
 

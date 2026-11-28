@@ -58,4 +58,35 @@ struct KvView {
 [[nodiscard]] KvView build_kv_view(const std::vector<std::int32_t>& pages, const KvViewSpec& spec,
                                    const std::vector<std::int32_t>& selected_blocks);
 
+/**
+ * The two position numbers a windowed view hands to the decode path.
+ *
+ * Decode reads two positions per row: `cache_positions` (where the column lands in the
+ * executed cache) and `rope_positions` (the phase the query is rotated with). A dropped
+ * prefix shortens the first and must not touch the second, so the difference is carried
+ * as `rope_delta`: every token still in the view keeps the phase it was written with,
+ * which is why no key is ever re-rotated.
+ *
+ * `execution_frontier` is what the compacted address reports; `committed_frontier` stays
+ * in original tokens so checkpoints and log-scaling still see the true timeline.
+ */
+struct KvViewBoundary {
+    std::int32_t dropped_tokens     = 0;
+    std::int32_t rope_delta         = 0; ///< accumulated, not per view
+    std::int32_t execution_frontier = 0;
+    std::int32_t committed_frontier = 0;
+};
+
+/**
+ * Folds one view into a sequence's position bookkeeping.
+ *
+ * `current_rope_delta` is the sequence's running value before this view. `visible_tokens`
+ * may be smaller than `original_frontier` (a dropped prefix) but never larger, and neither
+ * may be negative. Throws std::invalid_argument otherwise, so a mis-sized view cannot
+ * silently shift every later token's phase.
+ */
+[[nodiscard]] KvViewBoundary plan_view_boundary(std::int32_t original_frontier,
+                                                std::int32_t visible_tokens,
+                                                std::int32_t current_rope_delta);
+
 } // namespace ninfer::core

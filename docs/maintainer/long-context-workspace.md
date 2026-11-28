@@ -140,20 +140,32 @@ and Level 2 is the ceiling.
 Note what this experiment does *not* need: no assembler, no re-RoPE, no index. It is a prefill-prefix
 control that the engine can already express.
 
+**Result (measured 2026-11-28, section 10): the hypothesis holds at the observable level.** At a
+183,936-token prompt, the reference engine with a 114,688-token device window and a 98,304-token
+recall budget produces a **byte-identical** 47-token greedy answer and a byte-identical verbatim
+quote of the document's first lines, compared with the same engine in native full-attention mode and
+with this fork's native mode. The same engine at a 36,864-token budget silently drops one of four
+planted facts, which is the control that shows the probe can see failure. So carrying GDN state at
+the frontier while windowing only the 16 full-attention layers does not change behaviour when the
+budget covers the needed blocks.
+
 ## 5. Feasibility summary
 
 | Component | Confidence | Basis |
 |---|---:|---|
 | Page-table / transport / assembler engineering | 90 % | the substrate exists; this is scheduling code |
 | Mean-K index and block selection | 85 % | additive op plus a host-side scorer |
-| Full-attention view ≈ native window within tolerance | 80 % | measured in section 9: 4/4 needles at 342k tokens through a 114,688-token window |
-| **GDN "state at the frontier" hypothesis** | **60 %** | the reference keeps recurrent state untouched and is coherent at 342k (section 9), but the carried-state truncation experiment is still unrun |
-| 1M workspace on this 32 GB card (host tier) | 85 % | 342k measured at 26 GiB pinned host KV; 1M ≈ 33 GiB at bf16 fits the 64 GiB machine |
+| Full-attention view ≈ native window within tolerance | **90 %** | section 10: byte-identical output through an 81,920-token view |
+| ~~GDN "state at the frontier" hypothesis~~ — now **measured, holds** | **85 %** | section 10: identical output with carried state; the 50-60 % in earlier drafts was the absence of this experiment |
+| Per-block original positions in the attention path (replaces re-RoPE) | 75 % | section 10: the reference keeps each block's original RoPE frame and just packs the addresses, so `baked_pos` metadata is needed, not a re-RoPE kernel |
+| 1M workspace on this 32 GB card (host tier) | 85 % | 342k measured at 26 GiB pinned host KV and 637k at 30 GiB int8; 1M ≈ 33 GiB at bf16 fits the 64 GiB machine |
 | 4-8 week single-session MVP | 70 % | Levels 1-2 land first and become its foundation |
 | Productised (multi-session, regression-tested, restart-safe) | 40 % | needs session ownership on top of the FIFO/no-preemption model |
 
-Overall: **~65 %** for Level 3 as a capability, **85 %+** for "a bigger addressable context by some
-means" once Levels 1 and 2 are counted.
+Overall: **~75 %** for Level 3 as a capability, **90 %+** for "a bigger addressable context by some
+means". The remaining risk is not the GDN approximation any more; it is engineering volume — the
+reference integration is 397 files and +32,257/-1,952 lines against a lineage this fork diverged from
+in 983 shared files.
 
 ## 6. Acceptance criteria for whichever level is chosen
 
@@ -186,13 +198,16 @@ means" once Levels 1 and 2 are counted.
 
 | Order | Step | Cost | Decides |
 |---:|---|---|---|
-| 1 | Level 1 envelope and memory plan, measure the real GPU-only ceiling | days | the execution-view budget for Level 3 |
-| 2 | GDN carried-state experiment (section 4) | 1 day | whether Level 3 exists |
-| 3 | Level 2: host-tier prefix with text recall, 1M workspace | 1-2 weeks | the product value of a large workspace |
-| 4 | Level 3 only if step 2 passes: assembler, Mean-K index, re-RoPE | 3-4 further weeks | the recall latency improvement |
+| 1 | ~~Level 1 envelope and memory plan~~ **done: int8 KV reaches the 262,144 position capacity** | done | the execution-view budget for Level 3 |
+| 2 | ~~GDN carried-state experiment (section 4)~~ **done: output is byte-identical (section 10)** | done | Level 3 exists |
+| 3 | Level 3 increments: original-position view, Mean-K index, host tier, then block selection | 3-4 weeks | the workspace size |
+| 4 | Level 2 only if the index is deliberately deferred: host-tier prefix with text recall | 1-2 weeks | a fallback that needs the same host tiering |
 
-The first two steps are cheap enough to run before any commitment, and together they turn every
-number in this document into a measured one.
+Steps 1 and 2 are now measured rather than estimated, and both came out better than planned: the
+native ceiling is a KV-format choice, and the GDN approximation is observationally invisible. What is
+left is engineering volume, and the ordering follows from that — the view and the host tier are
+required by any of the options, the Mean-K index is what makes the view cheap, and block selection is
+the policy on top.
 
 ## 9. Measured: the reference KVMem integration on a 32 GB card
 
@@ -298,3 +313,66 @@ The needle driver is `E:\workspaces\ai\_tmp\needle_test.py` (stdlib only, run wi
 `E:\software\miniconda3\python.exe`), driven through `E:\workspaces\ai\_tmp\run-needle.ps1`; the
 prompts are built from `eval/corpora/perplexity-1m/data/`, so a run reproduces with the same corpora
 and no network.
+
+## 10. Measured: the windowed view reproduces the full view
+
+Section 4 said Level 3 rests on one hypothesis — that GDN state may stay at the frontier while only
+the 16 full-attention layers are windowed. This section tests that hypothesis on the one observable
+that matters: does the answer change?
+
+**Design.** One fixed prompt of 183,936 tokens (the same 640,000-character haystack, four planted
+fact codes at 5/35/65/99.5 % depth, plus a question). Two probes: one that needs all four distant
+facts, one that needs a verbatim quote from the very beginning of the document. Greedy decoding
+(`temperature 0`), so the comparison is exact rather than statistical. Four configurations, all
+against the same 19.03 GiB artifact:
+
+| Configuration | Attention view | Budget | codes probe | quote probe |
+|---|---|---:|---|---|
+| this fork, native bf16 | all 183,936 tokens | — | 4/4, 47 tokens | exact |
+| reference, native bf16 | all 183,936 tokens | — | 4/4, 47 tokens, **byte-identical to the row above** | — |
+| reference, KVMem | **81,920 tokens** (114,688 window, 98,304 budget) | 98,304 | 4/4, 47 tokens, **byte-identical** | **exact** |
+| reference, KVMem, negative control | 43,008 tokens | 36,864 | **3/4 — BETA dropped, no error** | — |
+
+Exact texts (identical in rows 1-3):
+
+```
+ALPHA=7134-MAGENTA
+BETA=2291-ORANGE
+GAMMA=5077-TURQUOISE
+DELTA=8642-VIOLET
+```
+
+```
+#pragma once
+
+// Implements: include/ninfer/ops/residual_add.h
+```
+
+**What this establishes.**
+
+1. **The GDN approximation is invisible here.** The truncated run attends 81,920 of 183,936 tokens,
+   carries GDN state forward from the full timeline, and still emits the same 47 tokens the
+   full-attention run emits. If carried state were semantically wrong, the divergence would show up
+   as a different first token at the answer, not as a cosmetic difference later.
+2. **Two independent lineages agree.** This fork's native path and the reference's native path — 983
+   shared files different, different kernels, different prefill speed (1.37k vs 1.13k tok/s) — produce
+   the same greedy output on the same artifact. The output comparison is therefore sensitive enough
+   to be worth trusting, and the two builds are numerically compatible at this depth.
+3. **The recall budget is the only fidelity knob, and failure is silent.** At 36,864 tokens the answer
+   is a clean three-item list with no error, no truncation marker, no warning: one fact is simply
+   gone. Any acceptance criterion has to be a retainer like this one, never "the answer looked fine".
+4. **Re-RoPE can be dropped from the port.** The reference keeps every block in its original RoPE
+   frame and only packs the *addresses* (`compact_start` is an attention address, and the payload
+   carries `baked_pos` per block). The verbatim quote from position 0 is exact through the windowed
+   path, so the port needs per-block original positions in the attention path, not a re-RoPE kernel —
+   which removes the numerically touchiest item from the earlier plan.
+
+**What it does not establish.** No native reference exists above 262,144 tokens on this card, so
+beyond that length the needle retainer (section 9) is the only check; and this experiment exercises
+the block *view*, not the block *selection* from a host tier, since the whole history fit in host RAM
+and was selected once. Those remain to be validated in the port itself.
+
+**Reproducing.** `E:\workspaces\ai\_tmp\fidelity_test.py` takes `--base-url`, `--probe codes|first_lines`,
+`--chars 640000` and prints JSON with the decoded text; both probes run against any of the serving
+lines above.
+

@@ -95,4 +95,81 @@ WorkspacePlan plan_workspace(const WorkspaceBudget& budget, std::span<const KvBl
     return plan;
 }
 
+std::vector<std::int32_t> select_kv_blocks(std::span<const float> scores, std::int32_t page_count,
+                                           const KvSelectSpec& spec) {
+    if (page_count <= 0) { throw std::invalid_argument("selection: page_count must be positive"); }
+    if (spec.block_pages <= 0) {
+        throw std::invalid_argument("selection: block_pages must be positive");
+    }
+    if (spec.sink_pages < 0 || spec.recent_pages < 0) {
+        throw std::invalid_argument("selection: sink_pages and recent_pages must be nonnegative");
+    }
+    if (spec.sink_pages + spec.recent_pages > page_count) {
+        throw std::invalid_argument("selection: sink_pages + recent_pages exceeds the request");
+    }
+
+    const std::int32_t block_count = (page_count + spec.block_pages - 1) / spec.block_pages;
+    if (static_cast<std::int32_t>(scores.size()) != block_count) {
+        throw std::invalid_argument("selection: scores must hold one value per block");
+    }
+    if (spec.budget_pages < 0 || spec.budget_pages > page_count) {
+        throw std::invalid_argument("selection: budget_pages must be in [0,page_count]");
+    }
+
+    auto first_page = [&](std::int32_t block) { return block * spec.block_pages; };
+    auto block_cost = [&](std::int32_t block) {
+        const std::int32_t first = first_page(block);
+        return std::min(spec.block_pages, page_count - first);
+    };
+
+    std::vector<bool> mandatory(static_cast<std::size_t>(block_count), false);
+    std::int32_t mandatory_pages = 0;
+    for (std::int32_t page = 0; page < page_count; ++page) {
+        const bool sink   = page < spec.sink_pages;
+        const bool recent = page >= page_count - spec.recent_pages;
+        if (!sink && !recent) { continue; }
+        const std::int32_t block = page / spec.block_pages;
+        if (mandatory[static_cast<std::size_t>(block)]) { continue; }
+        mandatory[static_cast<std::size_t>(block)] = true;
+        mandatory_pages += block_cost(block);
+    }
+
+    if (mandatory_pages > spec.budget_pages) {
+        throw std::runtime_error("selection: the mandatory blocks alone exceed the page budget");
+    }
+
+    std::vector<std::int32_t> candidates;
+    candidates.reserve(static_cast<std::size_t>(block_count));
+    for (std::int32_t block = 0; block < block_count; ++block) {
+        const float score = scores[static_cast<std::size_t>(block)];
+        if (!(score == score)) { throw std::invalid_argument("selection: scores must be finite"); }
+        if (!mandatory[static_cast<std::size_t>(block)]) { candidates.push_back(block); }
+    }
+    std::stable_sort(candidates.begin(), candidates.end(),
+                     [&](std::int32_t a, std::int32_t b) {
+                         const float sa = scores[static_cast<std::size_t>(a)];
+                         const float sb = scores[static_cast<std::size_t>(b)];
+                         if (sa != sb) { return sa > sb; }
+                         return a < b;
+                     });
+
+    std::vector<std::int32_t> chosen;
+    for (std::int32_t block = 0; block < block_count; ++block) {
+        if (mandatory[static_cast<std::size_t>(block)]) { chosen.push_back(block); }
+    }
+    std::int32_t used = mandatory_pages;
+    for (const std::int32_t block : candidates) {
+        const std::int32_t cost = block_cost(block);
+        if (used + cost > spec.budget_pages) { continue; }
+        chosen.push_back(block);
+        used += cost;
+    }
+
+    std::sort(chosen.begin(), chosen.end());
+    if (chosen.empty()) {
+        throw std::runtime_error("selection: no block fits the page budget");
+    }
+    return chosen;
+}
+
 } // namespace ninfer

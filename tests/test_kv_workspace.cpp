@@ -146,6 +146,62 @@ int main() {
                            "restore order is canonical");
     }
 
+    // Block selection under a page budget.
+    {
+        const ninfer::KvSelectSpec spec{4, 4, 4, 12};
+        // 16 pages, 4 pages per block, so four blocks; sink block 0 and recent block 3 are mandatory.
+        const std::vector<float> scores{0.1F, 0.9F, 0.5F, 0.2F};
+        const std::vector<std::int32_t> chosen = ninfer::select_kv_blocks(scores, 16, spec);
+        failures += expect(chosen == std::vector<std::int32_t>({0, 1, 3}),
+                           "highest scoring block is added to the mandatory ones");
+
+        const ninfer::KvSelectSpec tight{4, 4, 4, 8};
+        failures += expect(ninfer::select_kv_blocks(scores, 16, tight) ==
+                               std::vector<std::int32_t>({0, 3}),
+                           "a budget of two blocks keeps only the mandatory ones");
+
+        const ninfer::KvSelectSpec all{4, 4, 4, 16};
+        failures += expect(ninfer::select_kv_blocks(scores, 16, all) ==
+                               std::vector<std::int32_t>({0, 1, 2, 3}),
+                           "a full budget keeps every block");
+
+        const std::vector<float> tied{0.5F, 0.5F, 0.5F, 0.5F};
+        failures += expect(ninfer::select_kv_blocks(tied, 16, ninfer::KvSelectSpec{4, 4, 4, 12}) ==
+                               std::vector<std::int32_t>({0, 1, 3}),
+                           "ties go to the lower block id");
+
+        // 10 pages: the trailing block holds 2 pages, so it is cheaper than a full one.
+        const std::vector<float> tail_scores{0.1F, 0.2F, 0.9F};
+        failures += expect(ninfer::select_kv_blocks(tail_scores, 10, ninfer::KvSelectSpec{4, 4, 2,
+                                                                                         6}) ==
+                               std::vector<std::int32_t>({0, 2}),
+                           "a short trailing block costs its own pages");
+    }
+
+    // Selection rejects geometry it cannot honour instead of silently shrinking the request.
+    {
+        const std::vector<float> scores{0.5F, 0.5F, 0.5F, 0.5F};
+        failures += expect_throws(
+            [&] {
+                (void)ninfer::select_kv_blocks(scores, 16, ninfer::KvSelectSpec{4, 4, 4, 4});
+            },
+            "mandatory blocks exceeding the budget");
+        failures += expect_throws(
+            [&] { (void)ninfer::select_kv_blocks(scores, 16, ninfer::KvSelectSpec{0, 4, 4, 16}); },
+            "zero block_pages");
+        failures += expect_throws(
+            [&] {
+                (void)ninfer::select_kv_blocks(scores, 16, ninfer::KvSelectSpec{4, 16, 16, 16});
+            },
+            "sink and recent exceeding the request");
+        failures += expect_throws(
+            [&] {
+                (void)ninfer::select_kv_blocks(std::vector<float>{0.5F}, 16,
+                                               ninfer::KvSelectSpec{4, 4, 4, 16});
+            },
+            "a score per block is required");
+    }
+
     if (failures == 0) {
         std::cout << "kv_workspace: all checks passed\n";
     }

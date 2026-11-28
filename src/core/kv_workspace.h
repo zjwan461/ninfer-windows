@@ -63,4 +63,33 @@ struct WorkspacePlan {
                                            std::span<const KvBlock> blocks,
                                            std::span<const std::int32_t> selected_ids);
 
+// Which blocks to make visible when only a page budget is affordable.
+struct KvSelectSpec {
+    // Pages that form one block; the last block may be shorter.
+    std::int32_t block_pages = 0;
+    // Pages at the start of the request that are always visible.
+    std::int32_t sink_pages = 0;
+    // Pages at the end of the request that are always visible.
+    std::int32_t recent_pages = 0;
+    // Pages the executed view may occupy, sink and recent included.
+    std::int32_t budget_pages = 0;
+};
+
+/**
+ * Picks the recall blocks to execute for one request.
+ *
+ * `scores` holds one relevance score per block, in ascending block id; `page_count` is the
+ * request's page count, so the block count is ceil(page_count / block_pages). The result is the
+ * ascending set of block ids to make visible: every block that touches the sink prefix or the
+ * recent tail, plus the highest scoring remaining blocks that still fit `budget_pages`. Ties are
+ * broken toward the lower block id, and a block is only added when its whole span fits.
+ *
+ * The page cost of a block is its own page span, so a short trailing block costs less. When the
+ * mandatory blocks alone exceed the budget, or when no block can be afforded, the function throws
+ * std::runtime_error: shrinking the request is the caller's decision, not the selector's.
+ */
+[[nodiscard]] std::vector<std::int32_t> select_kv_blocks(std::span<const float> scores,
+                                                         std::int32_t page_count,
+                                                         const KvSelectSpec& spec);
+
 } // namespace ninfer

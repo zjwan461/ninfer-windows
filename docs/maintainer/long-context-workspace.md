@@ -452,6 +452,14 @@ RTX 4080 SUPER, Qwen3.8-27B int8 artifact, `NINFER_KV_RECALL=1 NINFER_KV_RECALL_
   covers everything after 167k), so the failure is not a dropped block: at 16 % retention the model
   answers from a diluted context. Raising the budget restores the exact full-view answer, which is
   what rules out a structural error in the swap (positions, phases, GDN alignment).
+- **The safe retention ratio is not one number.** `tools/bench/run_kv_recall_gate.py` serves the
+  baseline and the candidate one after the other (a 262k context fills most of the card, so they
+  cannot run together), compares greedy output byte for byte and prints the ratio. On the 200k
+  prompt above: budget 196,608 is the identity (no drop, 4/4, identical); budget 131,072 keeps
+  67.2 % and answers `GAMMA=5803-CYAN` where the full view says `GAMMA=5077-TURQUOISE` — correct
+  shape, invented value, the other three markers right. So fidelity is prompt- and depth-dependent,
+  and a gate has to report the ratio it ran at instead of claiming a global threshold. A depth-
+  stratified recall curve is the missing evidence.
 - **A view needs room to grow.** The compacted address is entitled to exactly the pages it keeps;
   growth is restored after the source is released. If the card's capacity is already spent by the
   history (for example `--max-context 16384` on a 14k prompt), that restoration fails and the next

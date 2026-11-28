@@ -210,6 +210,7 @@ code-heavy (~3.4 chars/token), so sizes are reported in tokens.
 | KVMem, B=65,536 | 208,512 | 81,920 | 20,480 MiB | 186,934 | 4/4 | 165.3 s | 1.13k tok/s | 31.2 tok/s |
 | KVMem, B=65,536 | 393,216 | 81,920 | 26,624 MiB | 342,354 | 3/4 | 317.7 s | 1.08k tok/s | 31.2 tok/s |
 | KVMem, B=98,304 | 393,216 | 114,688 | 26,624 MiB | 342,354 | **4/4** | 373.3 s | 918 tok/s | 28.2 tok/s |
+| KVMem, B=98,304, layerwise + meanq-cosine | 393,216 | 114,688 | 26,624 MiB | 342,354 | **4/4** | 325.7 s | 1.05k tok/s | 28.0 tok/s |
 | KVMem, B=98,304, second turn | 393,216 | 114,688 | 26,624 MiB | 342,354 | **4/4** | **1.2 s** | cached | 28.2 tok/s |
 
 What the table says:
@@ -234,6 +235,10 @@ What the table says:
    a 300× reduction. An agent that appends one step to a 342k workspace therefore pays the prefill
    once, not once per step. That is the number that makes a large workspace usable, and it comes from
    the verified-history reuse path, not from the selection heuristic.
+6. **The newer strategy is worth taking.** `--kvmem-recall-strategy layerwise --kvmem-query-scorer
+   meanq-cosine` reaches the same 4/4 at 342k with a 325.7 s TTFT instead of 373.3 s (-13 %), so the
+   port should target the layerwise Query/Pressure path rather than the legacy cumulative-attention
+   one.
 
 **Operational pitfalls found while measuring** (all of them cost a run):
 

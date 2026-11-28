@@ -190,6 +190,26 @@ ordinary_host_ingress->rope_positions[row]  = checked_i32(frontier, ...) + seque
 - 压实改变了 `checkpoint_frontier` 的覆盖，`rebuild_checkpoint_protection()` 必须跟着重跑；
 - 只重排、不丢弃的压实（选择集等于全体）必须等价于空操作，这是最容易被写错又最容易测的边界。
 
+### 7.7 应用时机：在采样之后、下一个请求之前（本轮读码得出）
+
+要把决策真正应用上去，顺序不是"边界一算完就换地址"，而是：
+
+1. **prompt 的最后一个 token 采样完成之后**。`advance_prefill` 在
+   `sample_from_hidden(schedule_state, prefill_hidden, staged.prompt_tokens, ...)` 里用**原始**前沿做
+   RoPE 相位；如果在此之前把地址换成压实视图，cache 里只剩可见页，而这一步仍按原始前沿去读，
+   attention 的范围与相位就会对不上，而且不会报错——只会给出一组看起来正常的错误 logits。
+2. **在请求边界**（下一轮 prefill 的入口，或事务里发布 continuation 的位置）。KVMem 的召回点本来就是
+   请求边界；把压实放进 `transactions/materialization.cpp` 的前缀 fork 处，才能复用已有的 entitlement
+   计算、retained-tail 备份与计时器。
+3. **换地址之后**：`sequence.text_kv_valid = visible`、`sequence.rope_delta += dropped`，并且必须
+   `recall_cursor->reset()`——块编号与内容在新地址上不再对应（§9 第 1 步已记这条约束）。
+4. **下一轮的采样位置**由新前沿 + delta 推出（decode 本来就是
+   `rope_pos = frontier + sequence.rope_delta`），不能再传原始 token 数。
+
+第 1、2 条正是这次没有直接动手的原因：第 1 条要求先找到"prompt 已采样、请求尚未进入 decode"的那个点，
+第 2 条要求在事务里加一条与 checkpoint 发布并列的分支。两者都必须与 `sequence.ledger`、prefix digests、
+checkpoint 覆盖一起改，属于会改变产品行为的集成，应当单独提交、单独验收。
+
 ## 8. 不在本计划内的做法
 
 - 不移植参考实现的存储格式与 397 文件补丁树本体（那是另一条血缘的引擎）。

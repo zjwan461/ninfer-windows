@@ -388,24 +388,42 @@ list.
 - **The selection is a pure function.** select_kv_blocks in src/core/kv_workspace.{h,cpp}
   chooses whole blocks under a page budget, always keeping the sink prefix and the recent tail,
   and throws rather than silently shrinking a request. plan_workspace in the same header turns a
-  selection into the residency move (stage_out before stage_in, a compacted 
-emaps list, and
+  selection into the residency move (stage_out before stage_in, a compacted remaps list, and
   the visible token count).
 - **The index primitives are on the device.** include/ninfer/ops/kv_block_pool.h provides
   kv_block_mean_keys (per 32-token-scale block, per layer, per KV head, the mean of the
   position-free key) and kv_block_scores (cosine of the GQA-meaned query against those means),
   both qualified against an independent FP64 oracle.
-- **The three compose, and the accounting is tested.** 	ests/test_kv_recall_plan.cpp runs
+- **The three compose, and the accounting is tested.** tests/test_kv_recall_plan.cpp runs
   scoring, selection, assembly and residency against each other over a 637k-token workspace and
   asserts the invariants the execution path will depend on: the budget is never exceeded, the
   needle and the compulsory blocks are always present, the executed order has no holes, a cold turn
   stages in exactly its selection, and a warm turn stages out only what the new selection dropped.
-- **The acceptance gate exists.** 	ools/bench/run_kv_recall_fidelity.py compares a baseline and a
+- **The acceptance gate exists.** tools/bench/run_kv_recall_fidelity.py compares a baseline and a
   candidate endpoint on byte-identical greedy output for two probes, and requires four markers to be
   recovered; it is the check that needs to pass before the view is allowed to change an answer.
 
 What is deliberately still missing is the mainline step: republishing a request's membership over
-the compacted page order at the request boundary, and the 
-ope_delta bookkeeping that goes with
+the compacted page order at the request boundary, and the rope_delta bookkeeping that goes with
 it. kvmem-port-plan.md section 7 records the exact seams for that, including the reason it needs
 no per-token position tensor.
+
+### 11.1 Measured: capture and the boundary decision on this card
+
+RTX 4080 SUPER, Qwen3.8-27B int8 artifact, `--max-context 262144 --kv-dtype int8`, capture enabled
+with `NINFER_KV_RECALL=1`.
+
+- **Capture keeps up.** `kv recall: captured 9 columns over 16 layers -> 0 complete blocks of 128`
+  at startup, then `captured 200832 columns over 16 layers -> 1569 complete blocks of 128` after a
+  200,897-token prompt. The 16 full-attention layers are dense; GDN layers never appear.
+- **A wide budget is the identity.** With `NINFER_KV_RECALL_BUDGET=262144` (wider than the prompt)
+  the boundary reports `view 200832 tokens (dropped 0), 1569 blocks kept, rope delta 0`, i.e. the
+  decision is exactly the current view, so the answer must not move — and it does not: the same
+  200,897-token needle prompt recovers the same four markers as the run with capture off
+  (112.8 s vs 128.4 s; the difference is capture cost and run-to-run variance, not a different
+  computation).
+- **A narrow budget drops and says so.** With `NINFER_KV_RECALL_BUDGET=8192` on a 16,896-token
+  history the boundary reports `view 8192 tokens (dropped 8704), 64 blocks kept, rope delta 8704`.
+  Nothing is applied yet, so this is a decision, not an effect.
+- **Cost.** Capture adds about 15 % to a 200k-token prefill on this card (112.8 s -> 128.4 s, one
+  run each) and is inert when the environment variable is unset, which is the default.

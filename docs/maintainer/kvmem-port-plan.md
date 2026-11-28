@@ -163,6 +163,10 @@ ordinary_host_ingress->rope_positions[row]  = checked_i32(frontier, ...) + seque
 
 *（2026-11-28 补记：`prepare_compacted_fork` / 显式页序已经落地，`commit_prefix_fork` 现在按页序走同一套 retain/protect/publish/active-reference 代码；见 `tests/models/qwen3_5/test_context_store.cpp` 的 compacted-view 一节，覆盖顺序、pin 集合、引用计数与"丢掉的页随源地址释放回池"。还差的不是存储层，而是采样侧：prefill 期间按块捕获 Mean-K、用最后一条用户消息打分、把选择结果接到这个调用点上。）*
 
+**7.6 捕获 Mean-K 的落点（读代码确认）。** 主路径里**没有**独立的 KV 追加点：KV 是在 `ops::causal_softmax_attention(qn, kn, v, cache_positions, {}, kv_table_rows, …)` 内部写进分页 cache 的（`src/models/qwen3_5/execution/text.cpp:916-923`，batch 形在 `:907-914`）。所以捕获要挂在**旋转之前**：`text_rope(rope_for_op, …, qn, kn, s)`（`text.cpp:882`）是原地旋转，它之前一刻的 `kn` 就是 pre-RoPE 的 K，形状 `[head_dim, kv_head_count, T]`——正好是 `kv_block_mean_keys` 要的 `[D,H,T]`，不需要反旋转，也不需要从分页布局里读回来。MTP 的对应位置是 `text.cpp:353`（旋转）与 `:486`（同一处旋转后再 `kv_cache_append`）。
+
+由此，这一步的实现顺序是：一个 per-request 索引对象（按 128-token 块累计 FP32 和与计数）→ 在 `text.cpp:882` 之前把本 chunk 的 `kn` 交给它（块边界跨 chunk，所以要带 `positions` 判断哪些列完成了整块）→ 请求边界用最后一条用户消息的 `qn` 调 `kv_block_scores` → `select_kv_blocks` → `prepare_compacted_fork`。索引对象是增量建的，这一点与参考实现一致：prefill 结束后再扫分页 cache 会漏掉 prefill 中途被换到主机的块。
+
 **7.4 动之前必须确认的三件事。**
 
 1. `committed_frontier` / `checkpoint_frontier` 是否必须以原始 token 计数表达（checkpoint 复用与 slot 文件都依赖它）；

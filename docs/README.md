@@ -80,6 +80,7 @@ other references own narrower contracts:
 | [N-gram speculation plan](maintainer/ngram-speculation-plan.md) | temporary: where phase 1 (`--ngram chain`) is documented, and the optional n-gram-only backend and verification wider than 16 |
 | [Performance levers](maintainer/performance-levers.md) | ranked decode and prefill options on the mainline models, their measured basis, gates and the closed list |
 | [Long-context workspaces](maintainer/long-context-workspace.md) | context capacity beyond the native window: the three levels, the GDN hypothesis, and the experiment that decides it |
+| [KVMem port plan](maintainer/kvmem-port-plan.md) | the module breakdown, order and acceptance for bringing the block view and host tier into this engine |
 
 Model cards contain official artifact facts and source provenance. The
 [conversion guide](weight-conversion.md) is the entry point for making an artifact. Exact config

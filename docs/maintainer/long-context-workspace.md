@@ -403,10 +403,11 @@ list.
   candidate endpoint on byte-identical greedy output for two probes, and requires four markers to be
   recovered; it is the check that needs to pass before the view is allowed to change an answer.
 
-What is deliberately still missing is the mainline step: republishing a request's membership over
-the compacted page order at the request boundary, and the rope_delta bookkeeping that goes with
-it. kvmem-port-plan.md section 7 records the exact seams for that, including the reason it needs
-no per-token position tensor.
+The mainline step is now in the tree as well, behind `NINFER_KV_RECALL_APPLY` (off by default):
+at the prompt boundary the sequence is moved onto an address published over the compacted page
+order, the source address is released, and `rope_delta` carries the tokens that left the cache.
+kvmem-port-plan.md section 7.11 records the three places that had to learn that a cache frontier
+and a timeline frontier are two numbers.
 
 ### 11.1 Measured: capture and the boundary decision on this card
 
@@ -427,3 +428,35 @@ with `NINFER_KV_RECALL=1`.
   Nothing is applied yet, so this is a decision, not an effect.
 - **Cost.** Capture adds about 15 % to a 200k-token prefill on this card (112.8 s -> 128.4 s, one
   run each) and is inert when the environment variable is unset, which is the default.
+
+### 11.2 Measured: the address swap, and what the view is worth
+
+RTX 4080 SUPER, Qwen3.8-27B int8 artifact, `NINFER_KV_RECALL=1 NINFER_KV_RECALL_APPLY=1`, greedy,
+`--kv-dtype int8`.
+
+- **The swap commits and the next tokens decode from it.** A 14,382-token prompt with budget 4096:
+  `boundary ... view 4014 tokens (dropped 10368), 32 blocks kept, rope delta 10368` then
+  `applied view 4014 tokens, rope delta 10368, next sample 14382, address row 0`. The answer to the
+  four-marker probe is the same string with the flag off and on, so keeping 4,014 of 14,382 tokens
+  left the needed content in view.
+- **Fidelity follows the retention ratio, not the mechanism.** The same 200,135-token prompt under
+  three budgets:
+
+  | budget | view | dropped | third marker |
+  |---|---|---|---|
+  | full (flag off) | 200,135 | 0 | `5077-TURQUOISE` |
+  | 131,072 | 131,015 | 69,120 | `5077-TURQUOISE`, identical to the full view |
+  | 32,768 | 32,711 | 167,424 | `5083-BL`, invented |
+
+  In the 32k view the block holding that marker is inside the window (depth 0.95 of 200k, the window
+  covers everything after 167k), so the failure is not a dropped block: at 16 % retention the model
+  answers from a diluted context. Raising the budget restores the exact full-view answer, which is
+  what rules out a structural error in the swap (positions, phases, GDN alignment).
+- **A view needs room to grow.** The compacted address is entitled to exactly the pages it keeps;
+  growth is restored after the source is released. If the card's capacity is already spent by the
+  history (for example `--max-context 16384` on a 14k prompt), that restoration fails and the next
+  append reports `KV coverage exceeds active entitlement`. Acceptance therefore runs with headroom
+  (32768 or 262144 in these runs).
+- **What this is worth.** 200k of history at 65 % retention answered identically to the full view
+  while fitting in half the cache, which is the point of the level: the same card can hold a
+  request it could not hold natively, at a retention ratio the operator chooses.

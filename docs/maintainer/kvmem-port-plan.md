@@ -228,18 +228,22 @@ checkpoint 覆盖一起改，属于会改变产品行为的集成，应当单独
 在它落地之前，`NINFER_KV_RECALL_APPLY` 只会在 `dropped_tokens == 0` 之外什么都不做：决策照旧打印，
 地址一个字都不改。这也是本轮没有把 `apply` 接进主线的原因——不是时机没想清楚，而是**最后一个字节还搬不过去**。
 
-具体的改法（下一轮可直接照做）：保留尾页不需要拷贝——尾页就在保留页序列的最后，物理身份不变，
-`committed_columns` 已经覆盖它需要的列。要改的只有两处：
+具体的改法（已实现，见 `531d35a6`）：保留尾页不需要拷贝——尾页就在保留页序列的最后，物理身份不变，
+`committed_columns` 已经覆盖它需要的列。改动落在两处：
 
 - `prepare_compacted_fork`：把 `frontier` 拆成 `full_pages = frontier / 64` 与 `tail_columns = frontier % 64`，
-  校验前 `full_pages` 页完整、最后保留页 `committed_columns >= tail_columns`；构造时传真实的
-  `tail_columns`、`tail_destination_` 仍为 `nullopt`（不拷贝）。
-- `commit_prefix_fork`：压实分支按 `required_pages = pages_for_tokens(frontier)` 逐页
-  `publish` / `retain_reference` / `protect_coverage(logical, page + 1 == required_pages && tail_columns
-  ? tail_columns : 64)` / `membership`，尾页与整页走同一条路，只是覆盖列数不同。前缀分支保持原样。
+  前 `full_pages` 页要求完整、最后的保留页要求 `committed_columns >= tail_columns` 且必须是源地址最新的
+  那一页；构造时传真实的 `tail_columns`、`tail_destination_` 仍为 `nullopt`（不拷贝）。
+- `commit_prefix_fork`：压实分支按 `required_pages` 逐页 publish / retain / `protect_coverage`（尾页只覆盖
+  `tail_columns` 列）/ membership；`needs_tail_copy()` 在压实分支恒为 false。
 
-对应的 store 测试就是现有那条的变体：4 整页 + 40 列的第五页，保留 `{0,2,3,4}`，断言
-`committed_frontier == 232`、`mapped_pages == 4`、钉住 4 页、丢掉的那页引用归零、释放后池子清空。
+store 测试里加的就是"整页 + 尾页"的组合：源 232 token（最后一页 40 列），保留 `{0,2,3}`、frontier 168，
+断言 `mapped_pages == 3`、`committed_frontier == 168`、尾页物理身份不变、被丢的那页引用归零、释放后池子清空。
+
+**下一步就只剩 `apply_recall_view` 本身**（开关 `NINFER_KV_RECALL_APPLY`）：deactivate 源 →
+`create_inactive` → `prepare_compacted_fork` → `commit_prefix_fork` → `sequence.kv->text = *destination` →
+`release(source)` → `plan_sequence_view` 写回 `rope_delta` / `text_kv_valid` / `execution_frontier` →
+`recall_cursor->reset()`。失败路径必须把序列留在原地址上（源已 deactivate，异常时重新 activate）。
 
 ## 8. 不在本计划内的做法
 

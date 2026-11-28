@@ -38,8 +38,10 @@ public:
     // subset of its columns.
     void capture(std::span<const float> keys, std::int32_t columns);
 
-    // Means of the complete blocks, laid out as [head_dim, kv_heads, complete_blocks].
-    [[nodiscard]] const std::vector<float>& block_means() const noexcept { return means_; }
+    // Means of the complete blocks, laid out as [head_dim, kv_heads, complete_blocks]. Materialized
+    // on demand: the layout depends on the block count, so it cannot be filled in one block at a
+    // time without rewriting what is already there.
+    [[nodiscard]] const std::vector<float>& block_means() const;
 
 private:
     void grow_to_blocks(std::int32_t blocks);
@@ -50,9 +52,10 @@ private:
     std::int32_t block_tokens_ = 0;
     std::uint32_t next_position_ = 0;
     std::int32_t complete_blocks_ = 0;
-    std::vector<float> sums_;  // [head_dim, kv_heads, blocks]
+    std::vector<float> sums_;  // [blocks][head_dim, kv_heads], block-major so growth only appends
     std::vector<std::uint32_t> counts_;
-    std::vector<float> means_; // [head_dim, kv_heads, complete_blocks]
+    mutable std::vector<float> means_; // [head_dim, kv_heads, complete_blocks]
+    mutable bool means_valid_ = false;
 };
 
 } // namespace ninfer

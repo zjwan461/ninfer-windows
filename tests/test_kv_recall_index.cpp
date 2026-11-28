@@ -74,7 +74,7 @@ void test_straddling_chunks() {
             for (std::int32_t dim = 0; dim < kHeadDim; ++dim) {
                 const double expected = oracle_mean(block, kBlock, head, dim);
                 const double actual =
-                    static_cast<double>(means[static_cast<std::size_t>((block * kHeads + head) * kHeadDim + dim)]);
+                    static_cast<double>(means[static_cast<std::size_t>((head * kHeadDim + dim) * index.complete_blocks() + block)]);
                 if (std::fabs(actual - expected) > 1e-5) {
                     expect(false, "block mean matches the column average");
                     std::cerr << "  block " << block << " head " << head << " dim " << dim << ": got "

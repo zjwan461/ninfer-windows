@@ -43,4 +43,33 @@ void kv_block_mean_keys(const Tensor& keys, std::int32_t block_tokens, Tensor& m
 void kv_block_scores(const Tensor& query, const Tensor& means, Tensor& scores,
                      cudaStream_t stream);
 
+/**
+ * Adds one prefill chunk of pre-rotation keys to a running per-block summary.
+ *
+ * Chunks and blocks do not line up: a chunk can straddle a block boundary and a block
+ * can take several chunks to fill. `sums` is contiguous FP32 [D,H,B] and `counts` is
+ * contiguous INT32 [B]; the caller keeps both across chunks and passes the position of
+ * the chunk's first column in `first_position`. After the call
+ *
+ *   sums[d,h,(first_position+p)/block_tokens] += float(keys[d,h,p])
+ *   counts[(first_position+p)/block_tokens]   += 1        (column order preserved)
+ *
+ * so `counts[b]` is the number of columns captured for block b. A chunk whose columns
+ * would pass the end of `sums` is rejected rather than silently truncated.
+ */
+void kv_block_accumulate(const Tensor& keys, std::int32_t block_tokens,
+                         std::int32_t first_position, Tensor& sums, Tensor& counts,
+                         cudaStream_t stream);
+
+/**
+ * Divides the running per-block sums by their exact column counts.
+ *
+ * `means` is contiguous FP32 [D,H,blocks] and receives, for every block with a non-zero
+ * count, `means[d,h,b] = sums[d,h,b] / counts[b]`. Blocks with no captured column are
+ * left untouched, so a request whose history ends mid-block keeps that partial block out
+ * of the summary instead of averaging a subset of its columns.
+ */
+void kv_block_finalize(const Tensor& sums, const Tensor& counts, Tensor& means,
+                       cudaStream_t stream);
+
 } // namespace ninfer::ops

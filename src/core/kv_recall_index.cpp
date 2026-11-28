@@ -28,36 +28,53 @@ void KvRecallIndex::reset() noexcept {
     sums_.clear();
     counts_.clear();
     means_.clear();
+    means_valid_ = false;
 }
 
 void KvRecallIndex::grow_to_blocks(std::int32_t blocks) {
     if (blocks <= 0) { return; }
     const std::size_t per_block = static_cast<std::size_t>(head_dim_) * static_cast<std::size_t>(kv_heads_);
     if (static_cast<std::size_t>(blocks) * per_block <= sums_.size()) { return; }
+    // Block-major storage: growing only appends, so a block already in the sum stays where it is.
     sums_.resize(static_cast<std::size_t>(blocks) * per_block, 0.0F);
     counts_.resize(static_cast<std::size_t>(blocks), 0U);
 }
 
 void KvRecallIndex::finish_block(std::int32_t block) {
-    const std::size_t per_block = static_cast<std::size_t>(head_dim_) * static_cast<std::size_t>(kv_heads_);
     if (counts_[static_cast<std::size_t>(block)] != static_cast<std::uint32_t>(block_tokens_)) {
         throw std::logic_error("kv_recall_index: block finished with the wrong column count");
     }
-    means_.resize(static_cast<std::size_t>(complete_blocks_ + 1) * per_block);
-    const float divisor = static_cast<float>(block_tokens_);
-    for (std::int32_t head = 0; head < kv_heads_; ++head) {
-        for (std::int32_t dim = 0; dim < head_dim_; ++dim) {
-            const std::size_t source = (static_cast<std::size_t>(block) * per_block) +
-                                       static_cast<std::size_t>(head) * static_cast<std::size_t>(head_dim_) +
-                                       static_cast<std::size_t>(dim);
-            const std::size_t target =
-                (static_cast<std::size_t>(complete_blocks_) * per_block) +
-                static_cast<std::size_t>(head) * static_cast<std::size_t>(head_dim_) +
-                static_cast<std::size_t>(dim);
-            means_[target] = sums_[source] / divisor;
+    // The published layout depends on how many blocks there are, so the summary is materialized
+    // once, on demand, instead of being rewritten in place every time a block completes.
+    means_valid_ = false;
+    ++complete_blocks_;
+}
+
+const std::vector<float>& KvRecallIndex::block_means() const {
+    if (means_valid_) { return means_; }
+    const std::size_t per_block =
+        static_cast<std::size_t>(head_dim_) * static_cast<std::size_t>(kv_heads_);
+    const std::size_t blocks = static_cast<std::size_t>(complete_blocks_);
+    means_.assign(blocks * per_block, 0.0F);
+    for (std::int32_t block = 0; block < complete_blocks_; ++block) {
+        const float divisor = static_cast<float>(counts_[static_cast<std::size_t>(block)]);
+        for (std::int32_t head = 0; head < kv_heads_; ++head) {
+            for (std::int32_t dim = 0; dim < head_dim_; ++dim) {
+                const std::size_t source =
+                    static_cast<std::size_t>(block) * per_block +
+                    static_cast<std::size_t>(head) * static_cast<std::size_t>(head_dim_) +
+                    static_cast<std::size_t>(dim);
+                // [head_dim, kv_heads, blocks], the layout the scoring op reads.
+                const std::size_t target = (static_cast<std::size_t>(head) *
+                                                static_cast<std::size_t>(head_dim_) +
+                                            static_cast<std::size_t>(dim)) * blocks +
+                                           static_cast<std::size_t>(block);
+                means_[target] = sums_[source] / divisor;
+            }
         }
     }
-    ++complete_blocks_;
+    means_valid_ = true;
+    return means_;
 }
 
 void KvRecallIndex::capture(std::span<const float> keys, std::int32_t columns) {

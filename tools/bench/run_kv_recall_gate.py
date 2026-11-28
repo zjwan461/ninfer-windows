@@ -157,12 +157,20 @@ def served(exe: pathlib.Path, artifact: pathlib.Path, prompt: str, model: str, m
         stop_server(process)
     text = log.read_text(encoding="utf-8", errors="replace")
     applied = APPLIED.search(text)
+    log_text = log.read_text(encoding="utf-8", errors="replace")
+    failure = None
+    for line in log_text.splitlines():
+        if "was refused" in line:
+            failure = line.split("refused:", 1)[-1].strip() or line.strip()
     entry = {
         "label": label,
         "budget": budget,
         "port": port,
         "seconds": round(seconds, 2),
         "answer": answer,
+        "log": log.read_text(encoding="utf-8", errors="replace"),
+        "refusal": (REFUSED.search(log.read_text(encoding="utf-8", errors="replace")) or
+                    [None])[0] if False else failure,
         "codes": sorted({f"{n}={c}" for n, c in MARKER.findall(answer)}),
         "view_tokens": int(applied.group(1)) if applied else None,
         "rope_delta": int(applied.group(2)) if applied else None,
@@ -212,17 +220,32 @@ def main(argv=None) -> int:
     history = candidate["view_tokens"] + (candidate["rope_delta"] or 0) \
         if candidate["view_tokens"] else None
     retention = (candidate["view_tokens"] / history) if history else None
+    refused = "was refused" in candidate["log"]
     same = baseline["answer"] == candidate["answer"]
-    need = args.expect_codes or len(baseline["codes"])
-    enough = len(candidate["codes"]) >= need
+    if args.expect_codes:
+        expected = len(depths)
+    else:
+        expected = len(baseline["codes"])
+    # Marker-level verdict: every planted fact the baseline reported must come back
+    # with the same value. Wording may differ; an invented value is a failure.
+    planted = {FIXTURE[index][0]: FIXTURE[index][1] for index in range(len(depths))}
+    baseline_codes = dict(item.split("=", 1) for item in baseline["codes"])
+    candidate_codes = dict(item.split("=", 1) for item in candidate["codes"])
+    checked = {name: planted[name] for name in baseline_codes if name in planted}
+    wrong = {name: candidate_codes.get(name) for name, value in checked.items()
+             if candidate_codes.get(name) != value}
+    recovered = len(checked) - len(wrong)
+    enough = recovered == len(checked) and bool(checked)
     report = {
         "chars": len(prompt),
         "budget": args.budget,
         "history_tokens": history,
         "retention": round(retention, 4) if retention else None,
         "identical": same,
-        "candidate_codes": len(candidate["codes"]),
-        "expect_codes": need,
+        "refused": refused,
+        "markers_checked": checked,
+        "markers_wrong": wrong,
+        "markers_expected": expected,
         "baseline": baseline,
         "candidate": candidate,
     }
@@ -234,10 +257,15 @@ def main(argv=None) -> int:
     if not same:
         print(f"  baseline : {baseline['answer'][:400]!r}")
         print(f"  candidate: {candidate['answer'][:400]!r}")
+    for name, value in wrong.items():
+        print(f"  marker {name}: planted {checked[name]}, answered {value}")
     print(f"retention {report['retention']}: "
-          f"{'identical' if same else 'DIFFERENT'}, codes {len(candidate['codes'])}/{need}"
-          f" (baseline {len(baseline['codes'])})")
-    passed = same and enough
+          f"{'identical wording' if same else 'different wording'}, "
+          f"markers {recovered}/{len(checked)}"
+          f" (baseline reported {len(baseline_codes)} of {expected} planted)")
+    if refused:
+        print(f"  swap refused: {candidate['refusal']}")
+    passed = enough and not refused
     print("PASS" if passed else "FAIL")
     return 0 if passed else 1
 

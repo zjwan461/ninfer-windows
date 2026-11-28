@@ -203,9 +203,16 @@ ordinary_host_ingress->rope_positions[row]  = checked_i32(frontier, ...) + seque
 
 1. **捕获**（`src/models/qwen3_5/execution/text.cpp:882`，已接好、默认关闭）：`TextContext::set_recall_sink` 为 null 时热路径
    没有额外工作；打开后每个标准注意力层在 `text_rope` 之前把 pre-RoPE 的 kn（`[head_dim, kv_head_count, T]`）交给
-   `KvRecallSink`，由 `KvRecallCursor` 按层累加。**待做**：在程序层按"一次前向"打开/关闭，并排除投机校验列。
+   `KvRecallSink`，由 `KvRecallCursor` 按层累加。程序层（`5c870d6e`）在 `ProgramImpl` 构造时按 `NINFER_KV_RECALL` 建游标，
+   经 `ExecutionCore::recall` 只交给规范 prefill；投机校验、评分前向、图内 decode 都拿不到它。
+   **实测**：一个 7,440 token 的 prompt 打印 `kv recall: captured 7440 columns over 16 layers -> 58 complete blocks of 128`，
+   之后每个续写前向（host 驱动的续 prefill）继续累加（+2/+3/+4），说明索引跟得住增长的历史。
+   **未做**：`captured_columns_` 跨轮次、跨复用一直累加；一旦压缩或换会话，块编号与内容不再对应，必须在序列被压实/复用时重建。
 2. **边界打分**（`src/models/qwen3_5/program/prefill.cpp:646` 一带，`publish_continuation` 闸口）：`KvRecallCursor::finish` →
    `kv_block_scores`（查询取最后一条 user 消息，GQA 分组平均的约定见 3.4）→ `core::plan_recall`。
+   **缺口**：查询向量目前还没有来源——`capture_layer` 只收 kn，`kv_block_scores` 需要同一层 pre-RoPE 的 qn。
+   下一步是给 `KvRecallSink` 加 `capture_query`（`text.cpp` 里紧挨 `capture_layer`，同样在 `text_rope` 之前），
+   游标保留最近 ≤512 列并按 (d, head) 求均值，再按 KV head 分组喂给打分算子。
 3. **发布压实视图**：`KvRecallDecision.view.pages` → `KVStore::prepare_compacted_fork` + `commit_prefix_fork`（已落地，
    `c75d9d48`）。**待做**：为目标 continuation 分配新的 KV 地址空间并在提交后替换 `sequence.kv->text`。
 4. **位置记账**：`KvRecallDecision.boundary` 写回序列（`rope_delta`、执行前沿、提交前沿）。decode 已经按行读两个位置，
@@ -230,3 +237,11 @@ ordinary_host_ingress->rope_positions[row]  = checked_i32(frontier, ...) + seque
 | 捕获接口与热路径钩子 | `src/core/kv_recall_sink.h`、`TextContext::set_recall_sink` | `bdd0d9f0` |
 | 一次召回点的合成决策 | `src/core/kv_recall_decision.{h,cpp}` | `9d08f766` |
 | 验收闸口 | `tools/bench/run_kv_recall_fidelity.py` | `012f2280` |
+| 主线捕获接线（默认关闭） | `program_impl`, `prefill`, `context.h` | `5c870d6e` |
+
+### 增量构建的坑（`5c870d6e` 期间）
+
+改了被广泛包含的头（`program/context.h` 给 `ExecutionCore` 加了一个成员）之后，ninja 只重编了 8-9 个目标就链接，
+生成的 serve 在 `initializing runtime` 处稳定崩溃（`0xC0000374` 堆损坏 / `0xC0000005`），而同一份源码 `git stash`
+后重编就正常——是旧目标文件与新结构体布局混用。把 `src/models/qwen3_5` 与 `src/core` 下所有源文件的时间戳刷新后整层重编，
+崩溃消失。**规则：改这类头之后要么整层重编，要么先 `ninja -t clean` 相关目录，不要相信增量结果。**

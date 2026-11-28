@@ -460,6 +460,17 @@ RTX 4080 SUPER, Qwen3.8-27B int8 artifact, `NINFER_KV_RECALL=1 NINFER_KV_RECALL_
   shape, invented value, the other three markers right. So fidelity is prompt- and depth-dependent,
   and a gate has to report the ratio it ran at instead of claiming a global threshold. A depth-
   stratified recall curve is the missing evidence.
+- **67 % is a genuine pass, and the earlier "passes" were not.** Three defects made the swap refuse
+  instead of apply (a kept page short by construction, a frontier that was not page aligned, a
+  protection wider than the columns the page held); the gate now reads `refused` out of the log, so a
+  refusal can no longer look like a pass. After those fixes, budget 131,072 keeps 67.3 % and answers
+  identically to the full view on two different marker layouts (5/35/65/95 % and 10/30/50/70/90 %),
+  with `applied view 131072 ... rope delta 63744` in the log.
+- **25 % fails by selection, not by dilution.** At budget 49,152 the marker at 65 % depth is answered
+  with an invented code. `NINFER_KV_RECALL_TRACE=1` prints the kept block ids: 384 blocks in range
+  0..1521, and the marker's block is not among them — it is outside sink and recent, and Mean-K
+  scoring did not rank it high enough. The model never had the evidence. So the remaining work at low
+  retention is selection quality, not the compaction mechanism.
 - **A view needs room to grow.** The compacted address is entitled to exactly the pages it keeps;
   growth is restored after the source is released. If the card's capacity is already spent by the
   history (for example `--max-context 16384` on a 14k prompt), that restoration fails and the next

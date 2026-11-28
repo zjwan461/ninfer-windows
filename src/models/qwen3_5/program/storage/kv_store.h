@@ -150,7 +150,12 @@ public:
     KVPrefixForkReservation(const KVPrefixForkReservation&)            = delete;
     KVPrefixForkReservation& operator=(const KVPrefixForkReservation&) = delete;
 
-    [[nodiscard]] bool needs_tail_copy() const noexcept { return tail_columns_ != 0; }
+    // A compacted view keeps its newest page in place, columns and all, so it never needs a tail copy
+    // even when that page is partial.
+    [[nodiscard]] bool needs_tail_copy() const noexcept {
+        return tail_columns_ != 0 && ordered_source_pages_.empty();
+    }
+    [[nodiscard]] std::uint32_t tail_columns() const noexcept { return tail_columns_; }
 
     // A compacted fork names its source pages explicitly instead of taking the address prefix:
     // ordered_source_pages()[i] is the source page that lands at destination page i.
@@ -1115,15 +1120,22 @@ public:
         if (entitlement < required_pages || entitlement > page_capacity_) {
             throw std::invalid_argument("KV compacted-view entitlement is invalid");
         }
-        const std::uint32_t page_size = static_cast<std::uint32_t>(kPagedKVPageSize);
+        const std::uint32_t page_size    = static_cast<std::uint32_t>(kPagedKVPageSize);
+        const std::uint32_t full_pages   = frontier / page_size;
+        const std::uint32_t tail_columns = frontier % page_size;
+        if (tail_columns != 0 &&
+            ordered_source_pages.back() + 1 != pages_for_tokens(source.committed_frontier)) {
+            throw std::logic_error("KV compacted-view tail page is not the newest kept page");
+        }
         for (std::size_t index = 0; index < ordered_source_pages.size(); ++index) {
             const std::uint32_t page = ordered_source_pages[index];
             if (page >= source.page_count || (index != 0 && page <= ordered_source_pages[index - 1])) {
                 throw std::invalid_argument("KV compacted-view page order is not strictly increasing");
             }
             const LogicalKVPageHandle logical = membership(source, page);
-            if (!pages_->device_resident(logical) ||
-                pages_->committed_columns(logical) < page_size ||
+            const bool tail_page = tail_columns != 0 && index + 1 == ordered_source_pages.size();
+            const std::uint32_t needed = tail_page ? tail_columns : page_size;
+            if (!pages_->device_resident(logical) || pages_->committed_columns(logical) < needed ||
                 !pages_->can_pin_source(logical) || !pages_->can_retain_reference(logical, false)) {
                 throw std::logic_error("KV compacted-view source page is not stable");
             }
@@ -1138,8 +1150,8 @@ public:
         std::vector<std::uint32_t> compact_pages(ordered_source_pages.begin(),
                                                  ordered_source_pages.end());
         return KVPrefixForkReservation(*this, source_handle, destination_handle, frontier,
-                                       required_pages, 0, entitlement, std::move(reservation),
-                                       std::move(row), std::nullopt, false,
+                                       required_pages, tail_columns, entitlement,
+                                       std::move(reservation), std::move(row), std::nullopt, false,
                                        std::move(compact_pages));
     }
 
@@ -1225,7 +1237,7 @@ public:
                 throw std::logic_error("KV prefix-fork source changed before publication");
             }
         }
-        if (fork.tail_columns_ != 0 &&
+        if (!fork.compacted() && fork.tail_columns_ != 0 &&
             (!fork.tail_destination_ || !pages_->valid(*fork.tail_destination_))) {
             throw std::logic_error("KV prefix-fork tail destination is stale");
         }
@@ -1242,7 +1254,11 @@ public:
         for (std::uint32_t page = 0; page < fork.full_pages_; ++page) {
             const LogicalKVPageHandle logical = fork_source_page(fork, source, page);
             pages_->retain_reference(logical, false);
-            pages_->protect_coverage(logical, static_cast<std::uint32_t>(kPagedKVPageSize));
+            const std::uint32_t columns =
+                (fork.compacted() && fork.tail_columns_ != 0 && page + 1 == fork.full_pages_)
+                    ? fork.tail_columns_
+                    : static_cast<std::uint32_t>(kPagedKVPageSize);
+            pages_->protect_coverage(logical, columns);
             membership(destination, page) = logical;
         }
         if (fork.tail_destination_) {

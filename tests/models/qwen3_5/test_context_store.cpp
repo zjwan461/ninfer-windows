@@ -521,6 +521,37 @@ void test_kv_store(ninfer::DeviceContext& device) {
     expect(pages.occupied() == 0 && physical_pages.allocated_pages() == 0,
            "the pages a compacted view drops come back to the pool with the source");
 
+    // A prompt's history is rarely page aligned, so the newest kept page can be partial. It is kept as
+    // itself rather than copied: its committed columns already cover every column the view needs.
+    const auto tail_source = addresses.create_active(4, 0);
+    expect(tail_source.has_value(), "partial-tail source allocation");
+    addresses.ensure_mapped_to_tokens(*tail_source, 232, device.stream);
+    addresses.commit_frontier(*tail_source, 232);
+    const std::array<std::uint32_t, 3> tail_kept{0, 2, 3};
+    const std::array tail_pages{addresses.logical_page(*tail_source, 0),
+                                addresses.logical_page(*tail_source, 2),
+                                addresses.logical_page(*tail_source, 3)};
+    const auto tail_dropped = addresses.logical_page(*tail_source, 1);
+    const auto partial_page = addresses.logical_page(*tail_source, 3);
+    expect(pages.committed_columns(partial_page) == 40, "partial tail page holds forty columns");
+    addresses.deactivate(*tail_source);
+    const auto tail_view = addresses.create_inactive();
+    expect(tail_view.has_value(), "partial-tail destination allocation");
+    auto tail_fork =
+        addresses.prepare_compacted_fork(*tail_source, *tail_view, tail_kept, 168, 3, 1);
+    expect(tail_fork.compacted() && !tail_fork.needs_tail_copy(),
+           "a partial tail page is kept in place and never copied");
+    addresses.commit_prefix_fork(std::move(tail_fork), device.stream);
+    expect(addresses.mapped_pages(*tail_view) == 3 &&
+               addresses.committed_frontier(*tail_view) == 168 &&
+               addresses.logical_page(*tail_view, 2) == tail_pages[2] &&
+               pages.address_references(tail_dropped) == 1,
+           "a compacted view keeps its partial tail page and drops nothing it did not select");
+    addresses.deactivate(*tail_view);
+    expect(addresses.release(*tail_view) && addresses.release(*tail_source) &&
+               pages.occupied() == 0 && physical_pages.allocated_pages() == 0,
+           "the partial-tail view releases cleanly");
+
     const auto mixed_source = addresses.create_active(4, 0);
     expect(mixed_source.has_value(), "mixed snapshot retained-prefix source allocation");
     addresses.ensure_mapped_to_tokens(*mixed_source, 65, device.stream);

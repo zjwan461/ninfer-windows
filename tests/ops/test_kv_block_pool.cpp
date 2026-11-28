@@ -23,20 +23,33 @@ namespace {
 constexpr double kMeanKeysTolerance = 1e-6;
 constexpr double kScoresTolerance   = 1e-6;
 
+// Element (d,h,p) of a [D,H,T] tensor sits at (h*D + d) + D*H*p: the head dimension is fastest.
+// Every buffer below is filled and read through these helpers so that the layout is exercised, not
+// assumed: a kernel that walked the tensor in the wrong order would compare against a different
+// element and fail.
+std::size_t key_index(int d, int h, int p, int dim, int heads) {
+    return static_cast<std::size_t>(h) * dim + static_cast<std::size_t>(d) +
+           static_cast<std::size_t>(dim) * heads * static_cast<std::size_t>(p);
+}
+
+std::size_t query_index(int d, int head, int dim) {
+    return static_cast<std::size_t>(d) + static_cast<std::size_t>(dim) * head;
+}
+
 std::vector<double> reference_mean_keys(const std::vector<float>& keys, int dim, int heads,
                                         int tokens, int block_tokens) {
     const int blocks = (tokens + block_tokens - 1) / block_tokens;
     std::vector<double> means(static_cast<std::size_t>(dim) * heads * blocks, 0.0);
     for (int h = 0; h < heads; ++h) {
         for (int d = 0; d < dim; ++d) {
-            const std::size_t row = (static_cast<std::size_t>(h) * dim + d) * tokens;
             for (int b = 0; b < blocks; ++b) {
                 const int first = b * block_tokens;
                 const int last  = std::min(tokens, first + block_tokens);
                 double    acc   = 0.0;
-                for (int p = first; p < last; ++p) { acc += static_cast<double>(keys[row + p]); }
-                means[(static_cast<std::size_t>(h) * dim + d) * blocks + b] =
-                    acc / static_cast<double>(last - first);
+                for (int p = first; p < last; ++p) {
+                    acc += static_cast<double>(keys[key_index(d, h, p, dim, heads)]);
+                }
+                means[key_index(d, h, b, dim, heads)] = acc / static_cast<double>(last - first);
             }
         }
     }
@@ -56,11 +69,10 @@ std::vector<double> reference_scores(const std::vector<float>& query, const std:
             for (int d = 0; d < dim; ++d) {
                 double pooled = 0.0;
                 for (int r = 0; r < group; ++r) {
-                    pooled += static_cast<double>(
-                        query[static_cast<std::size_t>(h * group + r) * dim + d]);
+                    pooled += static_cast<double>(query[query_index(d, h * group + r, dim)]);
                 }
                 pooled /= static_cast<double>(group);
-                const double mean = means[(static_cast<std::size_t>(h) * dim + d) * blocks + b];
+                const double mean = means[key_index(d, h, b, dim, kv_heads)];
                 dot += pooled * mean;
                 qn += pooled * pooled;
                 mn += mean * mean;
@@ -110,7 +122,7 @@ int scores_case(int dim, int kv_heads, int q_heads, int blocks, bool zero_block)
     if (zero_block) {
         for (int h = 0; h < kv_heads; ++h) {
             for (int d = 0; d < dim; ++d) {
-                means_f32[(static_cast<std::size_t>(h) * dim + d) * blocks] = 0.0F;
+                means_f32[key_index(d, h, 0, dim, kv_heads)] = 0.0F;
             }
         }
     }
@@ -163,8 +175,7 @@ int accumulate_case(int dim, int heads, int block_tokens, int total_columns, int
         for (int h = 0; h < heads; ++h) {
             for (int d = 0; d < dim; ++d) {
                 for (int c = 0; c < columns; ++c) {
-                    slice[(static_cast<std::size_t>(h) * dim + d) * columns + c] =
-                        keys[(static_cast<std::size_t>(h) * dim + d) * total_columns + first + c];
+                    slice[key_index(d, h, c, dim, heads)] = keys[key_index(d, h, first + c, dim, heads)];
                 }
             }
         }
@@ -212,13 +223,12 @@ int recall_chain_case(int dim, int kv_heads, int q_heads, int block_tokens, int 
                     const int group = q_heads / kv_heads;
                     float     pooled = 0.0F;
                     for (int r = 0; r < group; ++r) {
-                        pooled += query_vec[static_cast<std::size_t>(h * group + r) * dim + d];
+                        pooled += query_vec[query_index(d, h * group + r, dim)];
                     }
                     return pooled / static_cast<float>(group);
                 }();
             for (int c = 0; c < block_tokens; ++c) {
-                keys[(static_cast<std::size_t>(h) * dim + d) * total_columns + planted * block_tokens +
-                     c] = value;
+                keys[key_index(d, h, planted * block_tokens + c, dim, kv_heads)] = value;
             }
         }
     }
@@ -240,8 +250,8 @@ int recall_chain_case(int dim, int kv_heads, int q_heads, int block_tokens, int 
         for (int h = 0; h < kv_heads; ++h) {
             for (int d = 0; d < dim; ++d) {
                 for (int c = 0; c < columns; ++c) {
-                    slice[(static_cast<std::size_t>(h) * dim + d) * columns + c] =
-                        keys[(static_cast<std::size_t>(h) * dim + d) * total_columns + first + c];
+                    slice[key_index(d, h, c, dim, kv_heads)] =
+                        keys[key_index(d, h, first + c, dim, kv_heads)];
                 }
             }
         }
@@ -255,6 +265,20 @@ int recall_chain_case(int dim, int kv_heads, int q_heads, int block_tokens, int 
     Tensor means_tensor(device_means.p, DType::FP32, {dim, kv_heads, blocks});
     ops::kv_block_finalize(sums_tensor, counts_tensor, means_tensor, nullptr);
 
+    int failures = 0;
+    // Before the score is read, the accumulated means must already match the oracle: a failure here
+    // is a capture bug, while a failure only in the score is a scoring bug.
+    {
+        const std::vector<double> got_means = from_device_f32(device_means, dim * kv_heads * blocks);
+        const std::vector<double> want_means =
+            reference_mean_keys(keys, dim, kv_heads, total_columns, block_tokens);
+        const std::string means_label = "kv_block_pool recall chain means D=" + std::to_string(dim) +
+                                        " H=" + std::to_string(kv_heads) +
+                                        " blocks=" + std::to_string(blocks) +
+                                        " chunk=" + std::to_string(chunk);
+        failures += verify_pointwise(means_label, got_means, want_means,
+                                     PointwiseCriterion{kMeanKeysTolerance, kMeanKeysTolerance});
+    }
     DeviceBuffer device_query = to_device_bf16(query_vec);
     DeviceBuffer device_scores(static_cast<std::size_t>(blocks) * sizeof(float));
     Tensor query_tensor(device_query.p, DType::BF16, {dim, q_heads});
@@ -274,15 +298,15 @@ int recall_chain_case(int dim, int kv_heads, int q_heads, int block_tokens, int 
         std::cout << "FAIL: " << label << "\n  planted block " << planted << " scored "
                   << scores[static_cast<std::size_t>(planted)] << " but block " << best << " scored "
                   << scores[static_cast<std::size_t>(best)] << " (highest)\n";
-        return 1;
+        ++failures;
     }
     const double planted_score = scores[static_cast<std::size_t>(planted)];
     if (std::fabs(planted_score - 1.0) > 1e-3) {
         std::cout << "FAIL: " << label << "\n  planted block score " << planted_score
                   << " should be ~1\n";
-        return 1;
+        ++failures;
     }
-    return 0;
+    return failures;
 }
 
 } // namespace

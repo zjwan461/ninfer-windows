@@ -12,7 +12,9 @@ namespace ninfer::ops {
  * Captures one position-independent key summary per block of history.
  *
  * `keys` is contiguous BF16 [D,H,T] holding the keys as they are produced before
- * rotation is applied, so every element is already free of the position phase.
+ * rotation is applied, so every element is already free of the position phase. The
+ * declared shape is the memory layout: element (d,h,p) sits at index
+ * `(h*D + d) + D*H*p`, the head dimension fastest.
  * `block_tokens` consecutive positions form one block; the trailing block may be
  * shorter. `means` is contiguous FP32 [D,H,blocks] with blocks = ceil(T/block_tokens):
  *

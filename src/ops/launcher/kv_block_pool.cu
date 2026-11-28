@@ -28,13 +28,16 @@ __global__ void kv_block_mean_keys_kernel(const __nv_bfloat16* __restrict__ keys
     if (count <= 0) { return; }
 
     const std::size_t head_base  = static_cast<std::size_t>(head) * dim;
+    const std::size_t plane      = static_cast<std::size_t>(dim) * heads;
     const int         blocks     = gridDim.x;
     const float       inv_count  = 1.0F / static_cast<float>(count);
     for (int d = static_cast<int>(threadIdx.x); d < dim; d += static_cast<int>(blockDim.x)) {
-        const std::size_t row = (head_base + static_cast<std::size_t>(d)) * tokens;
+        const std::size_t slot = head_base + static_cast<std::size_t>(d);
         float             acc = 0.0F;
-        for (int p = first; p < last; ++p) { acc += __bfloat162float(keys[row + p]); }
-        means[(head_base + static_cast<std::size_t>(d)) * blocks + block] = acc * inv_count;
+        for (int p = first; p < last; ++p) {
+            acc += __bfloat162float(keys[slot + plane * static_cast<std::size_t>(p)]);
+        }
+        means[slot + plane * static_cast<std::size_t>(block)] = acc * inv_count;
     }
 }
 
@@ -48,20 +51,20 @@ __global__ void kv_block_scores_kernel(const __nv_bfloat16* __restrict__ query,
     if (warp >= kv_heads) { return; }
 
     const int group = q_heads / kv_heads;
+    const std::size_t mean_plane = static_cast<std::size_t>(dim) * kv_heads;
     float     dot   = 0.0F;
     float     q_norm = 0.0F;
     float     m_norm = 0.0F;
     for (int d = lane; d < dim; d += kScoresLanesPerHead) {
         float pooled = 0.0F;
         for (int r = 0; r < group; ++r) {
-            const std::size_t q_row =
-                (static_cast<std::size_t>(warp * group + r)) * dim + static_cast<std::size_t>(d);
-            pooled += __bfloat162float(query[q_row]);
+            const std::size_t q_slot = static_cast<std::size_t>(d) +
+                                       static_cast<std::size_t>(dim) * (warp * group + r);
+            pooled += __bfloat162float(query[q_slot]);
         }
         pooled /= static_cast<float>(group);
-        const float mean =
-            means[(static_cast<std::size_t>(warp) * dim + static_cast<std::size_t>(d)) * blocks +
-                  block];
+        const float mean = means[static_cast<std::size_t>(warp) * dim + static_cast<std::size_t>(d) +
+                                 mean_plane * static_cast<std::size_t>(block)];
         dot += pooled * mean;
         q_norm += pooled * pooled;
         m_norm += mean * mean;
@@ -140,13 +143,15 @@ __global__ void kv_block_accumulate_kernel(const __nv_bfloat16* __restrict__ key
     if (hi <= lo) { return; }
 
     const std::size_t head_base = static_cast<std::size_t>(head) * dim;
+    const std::size_t plane     = static_cast<std::size_t>(dim) * heads;
     for (int d = static_cast<int>(threadIdx.x); d < dim; d += static_cast<int>(blockDim.x)) {
+        const std::size_t slot = head_base + static_cast<std::size_t>(d);
         float acc = 0.0F;
         for (int position = lo; position < hi; ++position) {
             const int column = position - first_position;
-            acc += __bfloat162float(keys[(head_base + static_cast<std::size_t>(d)) * tokens + column]);
+            acc += __bfloat162float(keys[slot + plane * static_cast<std::size_t>(column)]);
         }
-        sums[(head_base + static_cast<std::size_t>(d)) * blocks + block] += acc;
+        sums[slot + plane * static_cast<std::size_t>(block)] += acc;
     }
 }
 
@@ -163,11 +168,13 @@ __global__ void kv_block_counts_kernel(int* __restrict__ counts, int tokens, int
 
 __global__ void kv_block_finalize_kernel(const float* __restrict__ sums,
                                           const int* __restrict__ counts, float* __restrict__ means,
-                                          int total, int blocks) {
+                                          int total, int plane) {
     const int index = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) +
                       static_cast<int>(threadIdx.x);
     if (index >= total) { return; }
-    const int count = counts[index % blocks];
+    // Blocks are the slowest dimension of the published layout, so the block of an element is its
+    // index divided by the size of one plane, not its index modulo the block count.
+    const int count = counts[index / plane];
     means[index]    = count > 0 ? sums[index] / static_cast<float>(count) : 0.0F;
 }
 
@@ -200,7 +207,8 @@ void kv_block_accumulate_launch(const Tensor& keys, std::int32_t block_tokens,
 void kv_block_finalize_launch(const Tensor& sums, const Tensor& counts, Tensor& means,
                               cudaStream_t stream) {
     const int blocks = sums.ne[2];
-    const int total  = sums.ne[0] * sums.ne[1] * blocks;
+    const int plane  = sums.ne[0] * sums.ne[1];
+    const int total  = plane * blocks;
     if (total <= 0 || blocks <= 0) { return; }
 
     const int threads = total < kAccumulateThreads ? total : kAccumulateThreads;
@@ -208,7 +216,7 @@ void kv_block_finalize_launch(const Tensor& sums, const Tensor& counts, Tensor& 
     kv_block_finalize_kernel<<<static_cast<unsigned int>(grid), static_cast<unsigned int>(threads),
                                0, stream>>>(static_cast<const float*>(sums.data),
                                             static_cast<const int*>(counts.data),
-                                            static_cast<float*>(means.data), total, blocks);
+                                            static_cast<float*>(means.data), total, plane);
     CUDA_CHECK(cudaGetLastError());
 }
 
